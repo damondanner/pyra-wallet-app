@@ -1,0 +1,357 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-28T23:22:28.003Z",
+  "defaultChainId": "base",
+  "defaultTestChainId": "base-sepolia",
+  "baseApp": {
+    "appId": "6a246aeaab28df7fd2fc178e",
+    "verifiedDomain": "https://damondanner.github.io/",
+    "metaTagName": "base:app_id",
+    "apiKeyEnv": "BASE_APP_API_KEY",
+    "status": "domain_verified"
+  },
+  "mobileWalletConnection": {
+    "enabled": false,
+    "provider": "reown_appkit",
+    "sdkPackage": "@reown/appkit",
+    "projectId": "",
+    "projectIdEnv": "REOWN_PROJECT_ID",
+    "status": "blocked_until_project_id_and_production_origin",
+    "metadata": {
+      "name": "PYRA Wallet",
+      "description": "Member wallet for the PYRA member-only barter network.",
+      "url": "https://wallet.pyraprotocol.com",
+      "icons": [
+        "https://wallet.pyraprotocol.com/pyra-wallet-icon.jpg"
+      ]
+    },
+    "originAllowlist": [
+      "https://wallet.pyraprotocol.com"
+    ],
+    "enableReconnect": false,
+    "enableNetworkSwitch": true,
+    "enableMobileFullScreen": true,
+    "features": {
+      "emailLogin": false,
+      "socialLogin": false,
+      "swaps": false,
+      "onramps": false,
+      "payments": false
+    }
+  },
+  "api": {
+    "memberStatus": {
+      "enabled": false,
+      "baseUrl": "",
+      "endpoint": "/api/member-status",
+      "method": "GET",
+      "source": "disabled_until_controlled_roster_storage"
+    }
+  },
+  "memberStatuses": {
+    "values": {
+      "NOT_CONNECTED": "not_connected",
+      "CONNECTED_UNAPPROVED": "connected_unapproved",
+      "KYC_PENDING": "kyc_pending",
+      "APPROVED": "approved",
+      "SUSPENDED": "suspended",
+      "REJECTED": "rejected"
+    },
+    "labels": {
+      "not_connected": "Not connected",
+      "connected_unapproved": "Connected, unapproved",
+      "kyc_pending": "KYC pending",
+      "approved": "Approved",
+      "suspended": "Suspended",
+      "rejected": "Rejected"
+    },
+    "sendAllowed": [
+      "approved"
+    ]
+  },
+  "walletNetworks": {
+    "base": {
+      "id": "base",
+      "chainId": 8453,
+      "chainIdHex": "0x2105",
+      "chainName": "Base",
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "rpcUrls": [
+        "https://mainnet.base.org"
+      ],
+      "blockExplorerUrls": [
+        "https://basescan.org"
+      ]
+    },
+    "base-sepolia": {
+      "id": "base-sepolia",
+      "chainId": 84532,
+      "chainIdHex": "0x14a34",
+      "chainName": "Base Sepolia",
+      "nativeCurrency": {
+        "name": "Sepolia Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "rpcUrls": [
+        "https://sepolia.base.org"
+      ],
+      "blockExplorerUrls": [
+        "https://sepolia.basescan.org"
+      ]
+    }
+  },
+  "chainExpansion": {
+    "maxTargetChains": 10,
+    "activeChainCount": 4,
+    "candidateChainCount": 2,
+    "remainingOpenSlots": 4,
+    "candidates": [
+      {
+        "id": "xrpl",
+        "name": "XRPL",
+        "family": "xrpl",
+        "status": "candidate",
+        "role": "future_public_network",
+        "priority": "high",
+        "reason": "User identified XRPL as a definite future chain candidate.",
+        "adapter": {
+          "family": "xrpl",
+          "status": "candidate_adapter",
+          "accountModel": "address",
+          "usesSmartContracts": false,
+          "supportsBalanceRead": false,
+          "supportsSend": false,
+          "supportsNetworkSwitch": false,
+          "balanceRead": null,
+          "sendReadiness": "requires_xrpl_token_model_and_trustline_flow"
+        },
+        "pyra": {
+          "tokenStandard": null,
+          "issuer": null,
+          "currencyCode": null,
+          "mintAddress": null,
+          "decimals": null,
+          "explorerUrl": null
+        },
+        "readiness": {
+          "send": "requires_xrpl_token_model_and_trustline_flow"
+        }
+      },
+      {
+        "id": "solana",
+        "name": "Solana",
+        "family": "solana",
+        "status": "candidate",
+        "role": "future_public_network",
+        "priority": "high",
+        "reason": "User identified Solana as a probable future chain candidate.",
+        "adapter": {
+          "family": "solana",
+          "status": "candidate_adapter",
+          "accountModel": "public_key",
+          "usesSmartContracts": false,
+          "supportsBalanceRead": false,
+          "supportsSend": false,
+          "supportsNetworkSwitch": false,
+          "balanceRead": null,
+          "sendReadiness": "requires_solana_mint_and_wallet_adapter"
+        },
+        "pyra": {
+          "tokenStandard": null,
+          "issuer": null,
+          "currencyCode": null,
+          "mintAddress": null,
+          "decimals": null,
+          "explorerUrl": null
+        },
+        "readiness": {
+          "send": "requires_solana_mint_and_wallet_adapter"
+        }
+      }
+    ]
+  },
+  "chains": [
+    {
+      "id": "ethereum",
+      "name": "Ethereum",
+      "family": "evm",
+      "status": "existing",
+      "role": "public_network",
+      "operatingBehavior": "standard_pyra",
+      "smartContractInteractionFee": true,
+      "chainId": 1,
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "explorers": [
+        "https://etherscan.io"
+      ],
+      "adapter": {
+        "family": "evm",
+        "status": "implemented_read_only",
+        "accountModel": "address",
+        "usesSmartContracts": true,
+        "supportsBalanceRead": true,
+        "supportsSend": false,
+        "supportsNetworkSwitch": true,
+        "balanceRead": {
+          "method": "eth_call",
+          "selector": "70a08231",
+          "functionSignature": "balanceOf(address)"
+        },
+        "sendReadiness": "requires_member_approval_gate_and_transaction_confirmation"
+      },
+      "readiness": {
+        "send": "requires_member_approval"
+      },
+      "pyra": {
+        "contractAddress": "0x774be8Aa7482E2d4a4961ECa756C73D662689dF1",
+        "assetId": null,
+        "symbol": "PYRA",
+        "decimals": 8,
+        "totalSupply": 1000000000000,
+        "explorerUrl": "https://etherscan.io/address/0x774be8Aa7482E2d4a4961ECa756C73D662689dF1",
+        "candidateStatus": null
+      }
+    },
+    {
+      "id": "bnb",
+      "name": "BNB Chain",
+      "family": "evm",
+      "status": "existing",
+      "role": "public_network",
+      "operatingBehavior": "standard_pyra",
+      "smartContractInteractionFee": true,
+      "chainId": 56,
+      "nativeCurrency": {
+        "name": "BNB",
+        "symbol": "BNB",
+        "decimals": 18
+      },
+      "explorers": [
+        "https://bscscan.com"
+      ],
+      "adapter": {
+        "family": "evm",
+        "status": "implemented_read_only",
+        "accountModel": "address",
+        "usesSmartContracts": true,
+        "supportsBalanceRead": true,
+        "supportsSend": false,
+        "supportsNetworkSwitch": true,
+        "balanceRead": {
+          "method": "eth_call",
+          "selector": "70a08231",
+          "functionSignature": "balanceOf(address)"
+        },
+        "sendReadiness": "requires_member_approval_gate_and_transaction_confirmation"
+      },
+      "readiness": {
+        "send": "requires_member_approval"
+      },
+      "pyra": {
+        "contractAddress": "0x1f58Ad973dA08e7743f7d34C7CF7afd883c05B4F",
+        "assetId": null,
+        "symbol": "PYRA",
+        "decimals": 16,
+        "totalSupply": 100000000000,
+        "explorerUrl": "https://bscscan.com/address/0x1f58Ad973dA08e7743f7d34C7CF7afd883c05B4F",
+        "candidateStatus": null
+      }
+    },
+    {
+      "id": "base",
+      "name": "Base",
+      "family": "evm",
+      "status": "existing",
+      "role": "modernization_target",
+      "operatingBehavior": "standard_pyra",
+      "smartContractInteractionFee": true,
+      "chainId": 8453,
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "explorers": [
+        "https://basescan.org"
+      ],
+      "adapter": {
+        "family": "evm",
+        "status": "implemented_read_only",
+        "accountModel": "address",
+        "usesSmartContracts": true,
+        "supportsBalanceRead": true,
+        "supportsSend": false,
+        "supportsNetworkSwitch": true,
+        "balanceRead": {
+          "method": "eth_call",
+          "selector": "70a08231",
+          "functionSignature": "balanceOf(address)"
+        },
+        "sendReadiness": "requires_member_approval_gate_and_transaction_confirmation"
+      },
+      "readiness": {
+        "send": "requires_member_approval"
+      },
+      "pyra": {
+        "contractAddress": "0x6ddd86ab7b9bb45924fcbd44369df013d363ed3e",
+        "assetId": null,
+        "symbol": "PYRA",
+        "decimals": 8,
+        "totalSupply": 100000000000,
+        "explorerUrl": "https://basescan.org/address/0x6ddd86ab7b9bb45924fcbd44369df013d363ed3e",
+        "candidateStatus": "deployed_mainnet"
+      }
+    },
+    {
+      "id": "algorand",
+      "name": "Algorand",
+      "family": "algorand",
+      "status": "existing",
+      "role": "b2b_only",
+      "operatingBehavior": "algorand_b2b_no_smart_contract_fee",
+      "smartContractInteractionFee": false,
+      "chainId": null,
+      "nativeCurrency": {
+        "name": "Algo",
+        "symbol": "ALGO",
+        "decimals": 6
+      },
+      "explorers": [
+        "https://allo.info",
+        "https://algoexplorer.io"
+      ],
+      "adapter": {
+        "family": "algorand",
+        "status": "planned_b2b_adapter",
+        "accountModel": "address",
+        "usesSmartContracts": false,
+        "supportsBalanceRead": false,
+        "supportsSend": false,
+        "supportsNetworkSwitch": false,
+        "balanceRead": null,
+        "sendReadiness": "requires_algorand_b2b_account_flow"
+      },
+      "readiness": {
+        "send": "requires_member_approval"
+      },
+      "pyra": {
+        "contractAddress": null,
+        "assetId": 512470133,
+        "symbol": "PYRA",
+        "decimals": 4,
+        "totalSupply": 100000000000,
+        "explorerUrl": "https://allo.info/asset/512470133",
+        "candidateStatus": null
+      }
+    }
+  ]
+}

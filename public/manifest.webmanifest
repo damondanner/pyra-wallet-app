@@ -1,0 +1,25 @@
+{
+  "id": "./",
+  "name": "PYRA Wallet",
+  "short_name": "PYRA",
+  "description": "Member wallet for the PYRA member-only barter network.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f2f5f3",
+  "theme_color": "#0d6f5d",
+  "orientation": "any",
+  "categories": [
+    "business",
+    "finance",
+    "productivity"
+  ],
+  "icons": [
+    {
+      "src": "./pyra-wallet-icon.jpg",
+      "sizes": "1024x1024",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

@@ -383,6 +383,11 @@
         font-size: 13px;
       }
 
+      .full-value {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
       .hidden {
         display: none;
       }
@@ -981,6 +986,19 @@
           <section class="panel view hidden" id="view-activity">
             <h2>Activity</h2>
             <p style="margin-top: 10px;">Draft PYRA barter activity records for review and export. These records do not broadcast blockchain transactions.</p>
+            <h3 style="margin-top: 18px;">Verify Base Transaction</h3>
+            <p class="small-note">Paste a Base mainnet transaction hash to verify the receipt and every PYRA Transfer event. This is read-only and never signs or broadcasts.</p>
+            <div class="form-grid" style="margin-top: 14px;">
+              <label>
+                Base transaction hash
+                <input id="transaction-verification-hash" autocomplete="off" spellcheck="false" placeholder="0x...">
+              </label>
+            </div>
+            <div class="actions" style="margin-top: 12px;">
+              <button class="secondary" id="verify-base-transaction" type="button">Verify Transaction</button>
+            </div>
+            <p class="small-note" id="transaction-verification-status">No transaction has been checked.</p>
+            <div class="chain-list" id="transaction-verification-result" style="margin-top: 14px;"></div>
             <div class="form-grid" style="margin-top: 14px;">
               <label>
                 Type
@@ -1230,6 +1248,7 @@
       let selectedWalletProviderInfo = null;
       const discoveredWalletProviders = [];
       const providerListenerRegistry = new WeakSet();
+      const EVM_TRANSFER_EVENT_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
       renderChains(chains);
       renderCandidateChains(candidateChains, {
@@ -1296,6 +1315,7 @@
       document.getElementById('send-amount').addEventListener('input', updateSendReadiness);
       document.getElementById('send-recipient').addEventListener('input', updateSendReadiness);
       document.getElementById('add-activity-record').addEventListener('click', addActivityRecord);
+      document.getElementById('verify-base-transaction').addEventListener('click', verifyBaseTransaction);
       document.getElementById('import-activity-json').addEventListener('click', importActivityJson);
       document.getElementById('export-activity-json').addEventListener('click', exportActivityJson);
       document.getElementById('export-activity-csv').addEventListener('click', exportActivityCsv);
@@ -3037,6 +3057,170 @@
         const fraction = rawValue % divisor;
         const fractionText = fraction.toString().padStart(decimals, '0').slice(0, 4).replace(/0+$/, '');
         return fractionText ? `${whole}.${fractionText}` : whole.toString();
+      }
+
+      function formatExactTokenAmount(rawValue, decimals) {
+        const divisor = 10n ** BigInt(decimals);
+        const whole = rawValue / divisor;
+        const fraction = rawValue % divisor;
+        const fractionText = fraction.toString().padStart(decimals, '0').replace(/0+$/, '');
+        return fractionText ? `${whole}.${fractionText}` : whole.toString();
+      }
+
+      async function verifyBaseTransaction() {
+        const hashInput = document.getElementById('transaction-verification-hash');
+        const status = document.getElementById('transaction-verification-status');
+        const result = document.getElementById('transaction-verification-result');
+        const hash = hashInput.value.trim();
+
+        result.innerHTML = '';
+        if (!isEvmTxHash(hash)) {
+          status.textContent = 'Enter a complete 0x-prefixed 32-byte transaction hash.';
+          return;
+        }
+
+        const chain = walletConfig && walletConfig.chains
+          ? walletConfig.chains.find(item => item.id === 'base')
+          : null;
+        const network = walletConfig && walletConfig.walletNetworks
+          ? walletConfig.walletNetworks.base
+          : fallbackWalletNetworks().base;
+
+        if (!chain || !chain.pyra || !isEvmAddress(chain.pyra.contractAddress) || !network) {
+          status.textContent = 'Base PYRA verification configuration is unavailable.';
+          return;
+        }
+
+        status.textContent = 'Reading the Base transaction receipt...';
+        try {
+          const receipt = await requestBaseTransactionReceipt(hash, network);
+          const verification = parseBasePyraTransferReceipt(receipt, chain, hash);
+          renderBaseTransactionVerification(verification, network);
+        } catch (error) {
+          status.textContent = `Receipt verification unavailable: ${error && error.message ? error.message : 'network error'}.`;
+        }
+      }
+
+      async function requestBaseTransactionReceipt(hash, network) {
+        const provider = getWalletProvider();
+        if (provider && connectedChainIdHex && connectedChainIdHex.toLowerCase() === network.chainIdHex.toLowerCase()) {
+          return provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
+        }
+
+        const rpcUrl = Array.isArray(network.rpcUrls) ? network.rpcUrls[0] : null;
+        if (!rpcUrl) throw new Error('Base RPC endpoint is not configured');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        try {
+          const response = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
+            signal: controller.signal,
+            cache: 'no-store'
+          });
+          if (!response.ok) throw new Error(`Base RPC HTTP ${response.status}`);
+          const payload = await response.json();
+          if (payload.error) throw new Error(payload.error.message || 'Base RPC returned an error');
+          return payload.result;
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      function parseBasePyraTransferReceipt(receipt, chain, requestedHash) {
+        if (!receipt) {
+          return { state: 'pending', verified: false, transactionHash: requestedHash, transfers: [] };
+        }
+
+        const contractAddress = chain.pyra.contractAddress.toLowerCase();
+        const decimals = Number.isInteger(chain.pyra.decimals) ? chain.pyra.decimals : 0;
+        const transfers = (Array.isArray(receipt.logs) ? receipt.logs : [])
+          .filter(log => (
+            log &&
+            String(log.address || '').toLowerCase() === contractAddress &&
+            Array.isArray(log.topics) &&
+            String(log.topics[0] || '').toLowerCase() === EVM_TRANSFER_EVENT_TOPIC &&
+            log.topics.length >= 3
+          ))
+          .map((log, index) => {
+            const from = evmAddressFromTopic(log.topics[1]);
+            const to = evmAddressFromTopic(log.topics[2]);
+            const amountBaseUnits = hexToBigInt(log.data);
+            return {
+              index: index + 1,
+              from,
+              to,
+              amountBaseUnits: amountBaseUnits.toString(),
+              amount: formatExactTokenAmount(amountBaseUnits, decimals)
+            };
+          })
+          .filter(transfer => transfer.from && transfer.to);
+
+        const successful = receipt.status === '0x1';
+        return {
+          state: !successful ? 'failed' : transfers.length > 0 ? 'confirmed' : 'not_pyra_transfer',
+          verified: successful && transfers.length > 0,
+          transactionHash: isEvmTxHash(receipt.transactionHash) ? receipt.transactionHash : requestedHash,
+          blockNumber: receipt.blockNumber ? hexToBigInt(receipt.blockNumber).toString() : null,
+          contractAddress: chain.pyra.contractAddress,
+          receiptFrom: isEvmAddress(receipt.from) ? receipt.from : null,
+          transfers
+        };
+      }
+
+      function evmAddressFromTopic(topic) {
+        if (typeof topic !== 'string' || !/^0x[a-fA-F0-9]{64}$/.test(topic)) return null;
+        const address = `0x${topic.slice(-40)}`;
+        return isEvmAddress(address) ? address : null;
+      }
+
+      function renderBaseTransactionVerification(verification, network) {
+        const status = document.getElementById('transaction-verification-status');
+        const result = document.getElementById('transaction-verification-result');
+        const explorerRoot = network.blockExplorerUrls && network.blockExplorerUrls[0]
+          ? network.blockExplorerUrls[0].replace(/\/$/, '')
+          : 'https://basescan.org';
+        const explorerUrl = `${explorerRoot}/tx/${verification.transactionHash}`;
+
+        if (verification.state === 'pending') {
+          status.textContent = 'Transaction not yet found on Base. It may still be pending or the hash may belong to another chain.';
+          return;
+        }
+
+        const labels = {
+          confirmed: 'Confirmed PYRA transaction',
+          failed: 'Failed Base transaction',
+          not_pyra_transfer: 'Not a PYRA transfer'
+        };
+        status.textContent = verification.verified
+          ? `Confirmed receipt with ${verification.transfers.length} PYRA Transfer event(s). Read-only verification only.`
+          : `${labels[verification.state] || 'Unverified transaction'}. No confirmed PYRA transfer was accepted.`;
+
+        const transferRows = verification.transfers.map(transfer => `
+          <div class="activity-row">
+            <div>
+              <strong>Transfer ${transfer.index}: PYRA ${escapeHtml(transfer.amount)}</strong>
+              <p class="full-value">From: ${escapeHtml(transfer.from)}</p>
+              <p class="full-value">To: ${escapeHtml(transfer.to)}</p>
+            </div>
+            <span>${escapeHtml(transfer.amountBaseUnits)} base units</span>
+            <span>confirmed</span>
+          </div>
+        `).join('');
+
+        result.innerHTML = `
+          <div class="activity-row">
+            <div>
+              <strong>${escapeHtml(labels[verification.state] || 'Receipt')}</strong>
+              <p class="full-value">Hash: ${escapeHtml(verification.transactionHash)}</p>
+              <p class="full-value">Contract: ${escapeHtml(verification.contractAddress || 'not matched')}</p>
+            </div>
+            <span>Block ${escapeHtml(verification.blockNumber || 'pending')}</span>
+            <a href="${escapeHtml(explorerUrl)}" target="_blank" rel="noopener noreferrer">BaseScan</a>
+          </div>
+          ${transferRows || '<p>No PYRA Transfer events from the configured Base contract were found.</p>'}
+        `;
       }
 
       function hexToBigInt(value) {

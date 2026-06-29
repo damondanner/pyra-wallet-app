@@ -996,8 +996,9 @@
             </div>
             <div class="actions" style="margin-top: 12px;">
               <button class="secondary" id="verify-base-transaction" type="button">Verify Transaction</button>
+              <button class="secondary" id="export-transaction-verification" type="button" disabled>Export Verification</button>
             </div>
-            <p class="small-note" id="transaction-verification-status">No transaction has been checked.</p>
+            <p class="small-note full-value" id="transaction-verification-status">No transaction has been checked.</p>
             <div class="chain-list" id="transaction-verification-result" style="margin-top: 14px;"></div>
             <div class="form-grid" style="margin-top: 14px;">
               <label>
@@ -1237,6 +1238,7 @@
       let activeTimeBankRateTable = null;
       let activeReceiveRequest = null;
       let activeSendReviewPacket = null;
+      let activeBaseTransactionVerification = null;
       let activeP2pPhotoMeta = null;
       let activeP2pPhotoUrl = null;
       let activeP2pReceipt = null;
@@ -1316,6 +1318,7 @@
       document.getElementById('send-recipient').addEventListener('input', updateSendReadiness);
       document.getElementById('add-activity-record').addEventListener('click', addActivityRecord);
       document.getElementById('verify-base-transaction').addEventListener('click', verifyBaseTransaction);
+      document.getElementById('export-transaction-verification').addEventListener('click', exportBaseTransactionVerification);
       document.getElementById('import-activity-json').addEventListener('click', importActivityJson);
       document.getElementById('export-activity-json').addEventListener('click', exportActivityJson);
       document.getElementById('export-activity-csv').addEventListener('click', exportActivityCsv);
@@ -3073,6 +3076,8 @@
         const result = document.getElementById('transaction-verification-result');
         const hash = hashInput.value.trim();
 
+        activeBaseTransactionVerification = null;
+        document.getElementById('export-transaction-verification').disabled = true;
         result.innerHTML = '';
         if (!isEvmTxHash(hash)) {
           status.textContent = 'Enter a complete 0x-prefixed 32-byte transaction hash.';
@@ -3165,6 +3170,7 @@
           blockNumber: receipt.blockNumber ? hexToBigInt(receipt.blockNumber).toString() : null,
           contractAddress: chain.pyra.contractAddress,
           receiptFrom: isEvmAddress(receipt.from) ? receipt.from : null,
+          verifiedAt: new Date().toISOString(),
           transfers
         };
       }
@@ -3187,6 +3193,14 @@
           status.textContent = 'Transaction not yet found on Base. It may still be pending or the hash may belong to another chain.';
           return;
         }
+
+        activeBaseTransactionVerification = {
+          ...verification,
+          chainId: 'base',
+          chainNumericId: 8453,
+          explorerUrl
+        };
+        document.getElementById('export-transaction-verification').disabled = false;
 
         const labels = {
           confirmed: 'Confirmed PYRA transaction',
@@ -3221,6 +3235,56 @@
           </div>
           ${transferRows || '<p>No PYRA Transfer events from the configured Base contract were found.</p>'}
         `;
+      }
+
+      async function exportBaseTransactionVerification() {
+        const status = document.getElementById('transaction-verification-status');
+        if (!activeBaseTransactionVerification) {
+          status.textContent = 'Verify a Base transaction receipt before exporting evidence.';
+          return;
+        }
+
+        const verification = activeBaseTransactionVerification;
+        const evidence = {
+          type: 'pyra_base_transaction_verification',
+          version: 1,
+          exported_at: new Date().toISOString(),
+          verified_at: verification.verifiedAt,
+          chain: {
+            id: verification.chainId,
+            chain_id: verification.chainNumericId,
+            name: 'Base'
+          },
+          receipt: {
+            state: verification.state,
+            verified_pyra_transfer: verification.verified,
+            transaction_hash: verification.transactionHash,
+            block_number: verification.blockNumber,
+            contract_address: verification.contractAddress,
+            transaction_sender: verification.receiptFrom,
+            explorer_url: verification.explorerUrl,
+            transfer_events: verification.transfers.map(transfer => ({
+              index: transfer.index,
+              from: transfer.from,
+              to: transfer.to,
+              amount_pyra: transfer.amount,
+              amount_base_units: transfer.amountBaseUnits
+            }))
+          },
+          guardrails: {
+            read_only_verification: true,
+            no_signature_requested: true,
+            no_transaction_broadcast: true,
+            not_a_digital_signature: true,
+            not_tax_or_accounting_classification: true,
+            operator_review_required: true
+          }
+        };
+        const evidenceSha256 = await sha256Hex(stableStringify(evidence));
+        const packet = { ...evidence, evidence_sha256: evidenceSha256 };
+        const hashLabel = verification.transactionHash.slice(2, 14).toLowerCase();
+        downloadJson(packet, `pyra_base_transaction_${hashLabel}_verification.json`);
+        status.textContent = `Verification evidence exported. SHA-256: ${evidenceSha256}`;
       }
 
       function hexToBigInt(value) {

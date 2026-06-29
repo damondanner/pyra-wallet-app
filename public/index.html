@@ -485,11 +485,11 @@
               <div class="panel">
                 <div class="label">Network</div>
                 <div class="value" id="network-value">Unknown</div>
-                <p id="target-network">Target: Base Sepolia</p>
+                <p id="target-network">Target: Base</p>
                 <div class="network-actions">
                   <select id="target-network-select" aria-label="Target network">
+                    <option value="base">Base</option>
                     <option value="base-sepolia">Base Sepolia</option>
-                    <option value="base">Base Mainnet</option>
                   </select>
                   <button class="secondary" id="switch-base">Switch Network</button>
                 </div>
@@ -1676,11 +1676,15 @@
 
       function updateTargetNetworkOptions(config) {
         if (!config.walletNetworks) return;
-        const selected = targetNetworkSelect.value || config.defaultTestChainId;
+        const selected = targetNetworkSelect.value || config.defaultChainId || config.defaultTestChainId;
         targetNetworkSelect.innerHTML = Object.values(config.walletNetworks)
           .map(network => `<option value="${network.id}">${network.chainName}</option>`)
           .join('');
-        targetNetworkSelect.value = config.walletNetworks[selected] ? selected : config.defaultTestChainId;
+        targetNetworkSelect.value = config.walletNetworks[selected]
+          ? selected
+          : config.walletNetworks[config.defaultChainId]
+            ? config.defaultChainId
+            : config.defaultTestChainId;
         updateTargetNetworkLabel();
       }
 
@@ -2360,7 +2364,7 @@
 
       function updateTargetNetworkLabel() {
         const target = getTargetNetwork();
-        document.getElementById('target-network').textContent = `Target: ${target ? target.chainName : 'Base Sepolia'}`;
+        document.getElementById('target-network').textContent = `Target: ${target ? target.chainName : 'Base'}`;
         updateNetworkStatus();
       }
 
@@ -2897,7 +2901,8 @@
 
       function getTargetNetwork() {
         const networks = walletConfig && walletConfig.walletNetworks ? walletConfig.walletNetworks : fallbackWalletNetworks();
-        return networks[targetNetworkSelect.value] || networks['base-sepolia'];
+        const configuredDefault = walletConfig && walletConfig.defaultChainId;
+        return networks[targetNetworkSelect.value] || networks[configuredDefault] || networks.base || networks['base-sepolia'];
       }
 
       function findWalletNetworkByHex(chainIdHex) {

@@ -630,6 +630,60 @@
                 <input id="p2p-receipt-file" type="file" accept="application/json,.json">
               </label>
             </div>
+            <h3 style="margin-top: 18px;">FMV Pricing Assistant</h3>
+            <p class="small-note">For FMV and tax math, 1 btc (barter credit) equals 1 USD. Estimates require member review and are not certified appraisals.</p>
+            <div class="form-grid" style="margin-top: 14px;">
+              <label class="full">
+                Confirmed item identity
+                <input id="p2p-fmv-item" placeholder="Brand, product, model, size, or variant">
+              </label>
+              <label>
+                Model or barcode
+                <input id="p2p-fmv-identifier" autocomplete="off" placeholder="Model, UPC, EAN, or GTIN">
+              </label>
+              <label>
+                Condition
+                <select id="p2p-fmv-condition">
+                  <option value="new">New</option>
+                  <option value="like_new">Like new</option>
+                  <option value="good" selected>Good</option>
+                  <option value="fair">Fair</option>
+                  <option value="poor">Poor</option>
+                </select>
+              </label>
+              <label>
+                Comparable 1 total (btc)
+                <input id="p2p-fmv-comp-1" inputmode="decimal" placeholder="0.00">
+              </label>
+              <label>
+                Comparable 1 source
+                <input id="p2p-fmv-source-1" inputmode="url" placeholder="Listing URL or source name">
+              </label>
+              <label>
+                Comparable 2 total (btc)
+                <input id="p2p-fmv-comp-2" inputmode="decimal" placeholder="0.00">
+              </label>
+              <label>
+                Comparable 2 source
+                <input id="p2p-fmv-source-2" inputmode="url" placeholder="Listing URL or source name">
+              </label>
+              <label>
+                Comparable 3 total (btc)
+                <input id="p2p-fmv-comp-3" inputmode="decimal" placeholder="0.00">
+              </label>
+              <label>
+                Comparable 3 source
+                <input id="p2p-fmv-source-3" inputmode="url" placeholder="Listing URL or source name">
+              </label>
+            </div>
+            <div class="actions" style="margin-top: 12px;">
+              <button class="secondary" id="p2p-fmv-find-comparables" type="button">Find Comparables</button>
+              <button class="secondary" id="p2p-fmv-calculate" type="button">Calculate FMV</button>
+              <button class="primary" id="p2p-fmv-use-suggestion" type="button" disabled>Use Suggested PYRA</button>
+            </div>
+            <div class="chain-list" id="p2p-fmv-search-links" style="margin-top: 12px;"></div>
+            <div class="chain-list" id="p2p-fmv-result" style="margin-top: 12px;"></div>
+            <p class="small-note" id="p2p-fmv-status">No FMV estimate prepared.</p>
             <div class="grid" style="margin-top: 14px;">
               <div class="panel">
                 <div class="label">Photo Preview</div>
@@ -1248,6 +1302,7 @@
       let activeP2pPhotoMeta = null;
       let activeP2pPhotoUrl = null;
       let activeP2pReceipt = null;
+      let activeP2pFmvEstimate = null;
       let activeEmergencyIou = null;
       let emergencyQrScanStream = null;
       let emergencyQrScanTimer = null;
@@ -1308,7 +1363,10 @@
         syncPricingModeFromChain(receiveChainSelect.value);
         updateReceiveRequestPreview();
       });
-      document.getElementById('p2p-chain').addEventListener('change', event => syncPricingModeFromChain(event.target.value));
+      document.getElementById('p2p-chain').addEventListener('change', event => {
+        syncPricingModeFromChain(event.target.value);
+        invalidateP2pFmvEstimate();
+      });
       document.getElementById('emergency-chain').addEventListener('change', event => syncPricingModeFromChain(event.target.value));
       document.getElementById('import-member-roster').addEventListener('click', importMemberRoster);
       document.getElementById('import-purchase-order').addEventListener('click', importPurchaseOrder);
@@ -1345,6 +1403,12 @@
       document.getElementById('p2p-photo').addEventListener('change', handleP2pPhotoCapture);
       document.getElementById('p2p-speak-description').addEventListener('click', startP2pSpeechDescription);
       document.getElementById('p2p-use-directory').addEventListener('click', useDirectoryForP2p);
+      document.getElementById('p2p-fmv-find-comparables').addEventListener('click', prepareP2pFmvSearchLinks);
+      document.getElementById('p2p-fmv-calculate').addEventListener('click', calculateP2pFmvEstimate);
+      document.getElementById('p2p-fmv-use-suggestion').addEventListener('click', useP2pFmvSuggestion);
+      for (const id of ['p2p-fmv-item', 'p2p-fmv-identifier', 'p2p-fmv-condition', 'p2p-fmv-comp-1', 'p2p-fmv-source-1', 'p2p-fmv-comp-2', 'p2p-fmv-source-2', 'p2p-fmv-comp-3', 'p2p-fmv-source-3']) {
+        document.getElementById(id).addEventListener(id === 'p2p-fmv-condition' ? 'change' : 'input', invalidateP2pFmvEstimate);
+      }
       document.getElementById('p2p-add-record').addEventListener('click', addP2pActivityRecord);
       document.getElementById('p2p-copy-receipt').addEventListener('click', copyP2pReceipt);
       document.getElementById('p2p-share-receipt').addEventListener('click', shareP2pReceipt);
@@ -3848,6 +3912,7 @@
           preview.style.display = 'none';
           value.textContent = 'No photo';
           detail.textContent = 'Photo image data is previewed only and is not stored in the draft activity cache.';
+          invalidateP2pFmvEstimate({ clearSearchLinks: true });
           return;
         }
 
@@ -3865,6 +3930,155 @@
         preview.style.display = 'block';
         value.textContent = 'Photo captured';
         detail.textContent = `${activeP2pPhotoMeta.name}; ${activeP2pPhotoMeta.type}; ${activeP2pPhotoMeta.size} bytes. Image data is preview-only.`;
+        invalidateP2pFmvEstimate({ clearSearchLinks: true });
+      }
+
+      function prepareP2pFmvSearchLinks() {
+        const itemInput = document.getElementById('p2p-fmv-item');
+        const description = document.getElementById('p2p-description').value.trim();
+        const identifier = document.getElementById('p2p-fmv-identifier').value.trim();
+        const condition = document.getElementById('p2p-fmv-condition').value.replace('_', ' ');
+        const item = itemInput.value.trim() || description;
+        const status = document.getElementById('p2p-fmv-status');
+        const links = document.getElementById('p2p-fmv-search-links');
+
+        if (!item) {
+          links.innerHTML = '';
+          status.textContent = 'Confirm an item identity or enter a P2P description before searching.';
+          return;
+        }
+
+        if (!itemInput.value.trim()) itemInput.value = item;
+        const query = [item, identifier, condition].filter(Boolean).join(' ');
+        const encoded = encodeURIComponent(query);
+        links.innerHTML = `
+          <div class="activity-row">
+            <div>
+              <strong>${escapeHtml(query)}</strong>
+              <p>Review matching condition, variant, shipping, and accessories before entering comparable totals.</p>
+            </div>
+            <a href="https://www.ebay.com/sch/i.html?_nkw=${encoded}" target="_blank" rel="noopener noreferrer">eBay</a>
+            <a href="https://www.google.com/search?tbm=shop&q=${encoded}" target="_blank" rel="noopener noreferrer">Shopping</a>
+          </div>
+        `;
+        status.textContent = 'Comparable searches prepared. Enter total listing prices in btc after confirming close matches.';
+      }
+
+      function calculateP2pFmvEstimate() {
+        const item = document.getElementById('p2p-fmv-item').value.trim();
+        const identifier = document.getElementById('p2p-fmv-identifier').value.trim();
+        const condition = document.getElementById('p2p-fmv-condition').value;
+        const chainId = document.getElementById('p2p-chain').value;
+        const status = document.getElementById('p2p-fmv-status');
+        const result = document.getElementById('p2p-fmv-result');
+        const comparables = [1, 2, 3].map(index => {
+          const amountText = document.getElementById(`p2p-fmv-comp-${index}`).value.trim();
+          const source = document.getElementById(`p2p-fmv-source-${index}`).value.trim();
+          return isPositiveDecimal(amountText)
+            ? { index, total_btc: Number(amountText), source: source || `Comparable ${index}`, source_url: normalizeHttpUrl(source) }
+            : null;
+        }).filter(Boolean);
+
+        if (!item) {
+          status.textContent = 'Confirm the exact item identity before calculating FMV.';
+          return;
+        }
+        if (comparables.length < 2) {
+          status.textContent = 'Enter at least two matching comparable totals before calculating FMV.';
+          return;
+        }
+
+        const totals = comparables.map(comparable => comparable.total_btc).sort((left, right) => left - right);
+        const middle = Math.floor(totals.length / 2);
+        const median = totals.length % 2 === 0 ? (totals[middle - 1] + totals[middle]) / 2 : totals[middle];
+        const snapshot = getBarterCreditSnapshotForChain(chainId);
+        const barterCreditValue = snapshot && Number(snapshot.value) > 0 ? Number(snapshot.value) : null;
+        const suggestedPyra = barterCreditValue ? formatP2pSuggestedPyra(median / barterCreditValue) : null;
+        const spreadRatio = totals[totals.length - 1] / totals[0];
+        const confidence = comparables.length >= 3 && identifier && spreadRatio <= 1.35 ? 'moderate' : 'low';
+
+        activeP2pFmvEstimate = {
+          type: 'pyra_p2p_fmv_estimate',
+          version: 1,
+          estimated_at: new Date().toISOString(),
+          item_identity: item,
+          identifier: identifier || null,
+          condition,
+          comparables,
+          method: 'median_member_reviewed_comparables',
+          market_value_btc: Number(median.toFixed(2)),
+          market_range_btc: {
+            low: Number(totals[0].toFixed(2)),
+            high: Number(totals[totals.length - 1].toFixed(2))
+          },
+          btc_usd_accounting_ratio: '1:1',
+          barter_credit_snapshot: snapshot,
+          suggested_pyra: suggestedPyra,
+          confidence,
+          guardrails: {
+            estimate_only: true,
+            not_a_certified_appraisal: true,
+            member_confirmation_required: true,
+            no_transaction_signature: true,
+            no_transaction_broadcast: true,
+            active_listing_prices_are_not_completed_sales: true
+          }
+        };
+
+        const sourceRows = comparables.map(comparable => {
+          const sourceLabel = escapeHtml(comparable.source);
+          const sourceMarkup = comparable.source_url
+            ? `<a href="${escapeHtml(comparable.source_url)}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
+            : sourceLabel;
+          return `<p>${sourceMarkup}: btc ${formatBtcAmount(comparable.total_btc)}</p>`;
+        }).join('');
+        result.innerHTML = `
+          <div class="activity-row">
+            <div>
+              <strong>Estimated FMV: btc (barter credit) ${formatBtcAmount(median)}</strong>
+              <p>Range: btc ${formatBtcAmount(totals[0])} to btc ${formatBtcAmount(totals[totals.length - 1])}; ${escapeHtml(confidence)} confidence.</p>
+              ${sourceRows}
+            </div>
+            <span>${suggestedPyra ? `${escapeHtml(suggestedPyra)} PYRA` : 'PYRA unavailable'}</span>
+            <span class="tag pending">review</span>
+          </div>
+        `;
+        document.getElementById('p2p-fmv-use-suggestion').disabled = !suggestedPyra;
+        status.textContent = suggestedPyra
+          ? `Suggested ${suggestedPyra} PYRA from btc ${formatBtcAmount(median)} using the selected chain's barter-credit snapshot.`
+          : `FMV calculated as btc ${formatBtcAmount(median)}. A validated barter-credit snapshot is required for a PYRA suggestion.`;
+      }
+
+      function useP2pFmvSuggestion() {
+        if (!activeP2pFmvEstimate || !activeP2pFmvEstimate.suggested_pyra) return;
+        document.getElementById('p2p-amount').value = activeP2pFmvEstimate.suggested_pyra;
+        document.getElementById('p2p-fmv-status').textContent = 'Suggested PYRA amount placed in the P2P draft. Both members must review and agree before any wallet action.';
+      }
+
+      function invalidateP2pFmvEstimate(options = {}) {
+        activeP2pFmvEstimate = null;
+        document.getElementById('p2p-fmv-use-suggestion').disabled = true;
+        document.getElementById('p2p-fmv-result').innerHTML = '';
+        const changedField = options.target && options.target.id;
+        if (options.clearSearchLinks || ['p2p-fmv-item', 'p2p-fmv-identifier', 'p2p-fmv-condition'].includes(changedField)) {
+          document.getElementById('p2p-fmv-search-links').innerHTML = '';
+        }
+        document.getElementById('p2p-fmv-status').textContent = 'Pricing inputs changed. Calculate a new FMV estimate.';
+      }
+
+      function normalizeHttpUrl(value) {
+        if (!value) return null;
+        try {
+          const url = new URL(value);
+          return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+        } catch (error) {
+          return null;
+        }
+      }
+
+      function formatP2pSuggestedPyra(value) {
+        if (!Number.isFinite(value) || value <= 0) return null;
+        return value.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
       }
 
       function startP2pSpeechDescription() {
@@ -3987,6 +4201,7 @@
           description,
           description_source: getP2pDescriptionSource(),
           photo_evidence: normalizeP2pPhotoEvidence(record.photoEvidence),
+          fmv_pricing_assistant: activeP2pFmvEstimate ? JSON.parse(JSON.stringify(activeP2pFmvEstimate)) : null,
           guardrails: {
             draft_receipt_only: true,
             no_transaction_signature: true,

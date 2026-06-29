@@ -993,12 +993,18 @@
                 Base transaction hash
                 <input id="transaction-verification-hash" autocomplete="off" spellcheck="false" placeholder="0x...">
               </label>
+              <label>
+                Verification evidence JSON
+                <input id="transaction-verification-import-file" type="file" accept="application/json,.json">
+              </label>
             </div>
             <div class="actions" style="margin-top: 12px;">
               <button class="secondary" id="verify-base-transaction" type="button">Verify Transaction</button>
               <button class="secondary" id="export-transaction-verification" type="button" disabled>Export Verification</button>
+              <button class="secondary" id="validate-transaction-verification" type="button">Validate Evidence</button>
             </div>
             <p class="small-note full-value" id="transaction-verification-status">No transaction has been checked.</p>
+            <p class="small-note full-value" id="transaction-evidence-validation-status">No evidence file has been validated.</p>
             <div class="chain-list" id="transaction-verification-result" style="margin-top: 14px;"></div>
             <div class="form-grid" style="margin-top: 14px;">
               <label>
@@ -1319,6 +1325,7 @@
       document.getElementById('add-activity-record').addEventListener('click', addActivityRecord);
       document.getElementById('verify-base-transaction').addEventListener('click', verifyBaseTransaction);
       document.getElementById('export-transaction-verification').addEventListener('click', exportBaseTransactionVerification);
+      document.getElementById('validate-transaction-verification').addEventListener('click', validateTransactionVerificationEvidence);
       document.getElementById('import-activity-json').addEventListener('click', importActivityJson);
       document.getElementById('export-activity-json').addEventListener('click', exportActivityJson);
       document.getElementById('export-activity-csv').addEventListener('click', exportActivityCsv);
@@ -3285,6 +3292,114 @@
         const hashLabel = verification.transactionHash.slice(2, 14).toLowerCase();
         downloadJson(packet, `pyra_base_transaction_${hashLabel}_verification.json`);
         status.textContent = `Verification evidence exported. SHA-256: ${evidenceSha256}`;
+      }
+
+      async function validateTransactionVerificationEvidence() {
+        const fileInput = document.getElementById('transaction-verification-import-file');
+        const status = document.getElementById('transaction-evidence-validation-status');
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) {
+          status.textContent = 'Choose a verification evidence JSON file first.';
+          return;
+        }
+        if (file.size > 1024 * 1024) {
+          status.textContent = 'Evidence validation failed: the JSON file exceeds the 1 MB limit.';
+          return;
+        }
+
+        status.textContent = 'Checking evidence structure and SHA-256 integrity...';
+        try {
+          const packet = JSON.parse(await file.text());
+          const errors = validateTransactionVerificationPacket(packet);
+          if (errors.length > 0) {
+            status.textContent = `Evidence validation failed: ${errors.join('; ')}.`;
+            return;
+          }
+
+          const { evidence_sha256: expectedDigest, ...evidence } = packet;
+          const actualDigest = await sha256Hex(stableStringify(evidence));
+          if (actualDigest !== expectedDigest.toLowerCase()) {
+            status.textContent = 'Evidence integrity check failed. The file content does not match its recorded SHA-256 digest.';
+            return;
+          }
+
+          const transactionHash = packet.receipt.transaction_hash;
+          document.getElementById('transaction-verification-hash').value = transactionHash;
+          status.textContent = `Evidence integrity verified for ${transactionHash}. The file digest matches; click Verify Transaction to recheck Base.`;
+        } catch (error) {
+          status.textContent = `Evidence validation failed: ${error && error.message ? error.message : 'invalid JSON file'}.`;
+        }
+      }
+
+      function validateTransactionVerificationPacket(packet) {
+        const errors = [];
+        const baseChain = walletConfig && Array.isArray(walletConfig.chains)
+          ? walletConfig.chains.find(item => item.id === 'base')
+          : null;
+        const configuredContract = baseChain && baseChain.pyra && isEvmAddress(baseChain.pyra.contractAddress)
+          ? baseChain.pyra.contractAddress.toLowerCase()
+          : null;
+
+        if (!packet || typeof packet !== 'object' || Array.isArray(packet)) return ['root must be a JSON object'];
+        if (packet.type !== 'pyra_base_transaction_verification') errors.push('unsupported evidence type');
+        if (packet.version !== 1) errors.push('unsupported evidence version');
+        if (!/^[a-fA-F0-9]{64}$/.test(String(packet.evidence_sha256 || ''))) errors.push('invalid evidence SHA-256');
+        if (!isValidIsoTimestamp(packet.exported_at) || !isValidIsoTimestamp(packet.verified_at)) errors.push('invalid evidence timestamp');
+        if (!packet.chain || packet.chain.id !== 'base' || packet.chain.chain_id !== 8453) errors.push('chain must be Base mainnet (8453)');
+        if (!configuredContract) errors.push('configured Base PYRA contract is unavailable');
+        if (!packet.receipt || typeof packet.receipt !== 'object' || Array.isArray(packet.receipt)) {
+          errors.push('receipt is missing');
+          return errors;
+        }
+
+        const receipt = packet.receipt;
+        if (!isEvmTxHash(receipt.transaction_hash)) errors.push('invalid transaction hash');
+        if (!isEvmAddress(receipt.contract_address)) {
+          errors.push('invalid PYRA contract address');
+        } else if (configuredContract && receipt.contract_address.toLowerCase() !== configuredContract) {
+          errors.push('contract does not match configured Base PYRA');
+        }
+        if (!['confirmed', 'failed', 'not_pyra_transfer'].includes(receipt.state)) errors.push('invalid receipt state');
+        if (typeof receipt.verified_pyra_transfer !== 'boolean') errors.push('verified transfer flag must be boolean');
+        if (!Array.isArray(receipt.transfer_events)) {
+          errors.push('transfer events must be an array');
+        } else {
+          receipt.transfer_events.forEach((transfer, index) => {
+            const label = `transfer event ${index + 1}`;
+            if (!transfer || typeof transfer !== 'object' || Array.isArray(transfer)) {
+              errors.push(`${label} is invalid`);
+              return;
+            }
+            if (transfer.index !== index + 1) errors.push(`${label} has an invalid index`);
+            if (!isEvmAddress(transfer.from) || !isEvmAddress(transfer.to)) errors.push(`${label} has an invalid address`);
+            if (!/^(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(String(transfer.amount_pyra || ''))) errors.push(`${label} has an invalid PYRA amount`);
+            if (!/^(0|[1-9][0-9]*)$/.test(String(transfer.amount_base_units || ''))) errors.push(`${label} has invalid base units`);
+          });
+        }
+        if (receipt.verified_pyra_transfer && (receipt.state !== 'confirmed' || !Array.isArray(receipt.transfer_events) || receipt.transfer_events.length === 0)) {
+          errors.push('verified transfer claim does not match receipt state');
+        }
+        if (!receipt.verified_pyra_transfer && receipt.state === 'confirmed') {
+          errors.push('confirmed receipt must carry a verified transfer claim');
+        }
+
+        const guardrails = packet.guardrails;
+        const requiredGuardrails = [
+          'read_only_verification',
+          'no_signature_requested',
+          'no_transaction_broadcast',
+          'not_a_digital_signature',
+          'not_tax_or_accounting_classification',
+          'operator_review_required'
+        ];
+        if (!guardrails || typeof guardrails !== 'object' || requiredGuardrails.some(key => guardrails[key] !== true)) {
+          errors.push('required evidence guardrails are missing');
+        }
+        return errors;
+      }
+
+      function isValidIsoTimestamp(value) {
+        return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
       }
 
       function hexToBigInt(value) {

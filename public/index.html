@@ -677,6 +677,7 @@
               </label>
             </div>
             <div class="actions" style="margin-top: 12px;">
+              <button class="secondary" id="p2p-fmv-scan-barcode" type="button" disabled>Scan Barcode</button>
               <button class="secondary" id="p2p-fmv-find-comparables" type="button">Find Comparables</button>
               <button class="secondary" id="p2p-fmv-calculate" type="button">Calculate FMV</button>
               <button class="primary" id="p2p-fmv-use-suggestion" type="button" disabled>Use Suggested PYRA</button>
@@ -689,7 +690,7 @@
                 <div class="label">Photo Preview</div>
                 <div class="value" id="p2p-photo-value">No photo</div>
                 <img id="p2p-photo-preview" alt="P2P exchange item preview" style="display: none; width: 100%; max-height: 260px; object-fit: cover; border-radius: 8px; margin-top: 12px;">
-                <p id="p2p-photo-detail">Photo image data is previewed only and is not stored in the draft activity cache.</p>
+                <p class="full-value" id="p2p-photo-detail">Photo image data is previewed only and is not stored in the draft activity cache.</p>
               </div>
               <div class="panel">
                 <div class="label">Voice Description</div>
@@ -1301,6 +1302,7 @@
       let activeBaseTransactionVerification = null;
       let activeP2pPhotoMeta = null;
       let activeP2pPhotoUrl = null;
+      let activeP2pSanitizedPhotoBlob = null;
       let activeP2pReceipt = null;
       let activeP2pFmvEstimate = null;
       let activeEmergencyIou = null;
@@ -1403,6 +1405,7 @@
       document.getElementById('p2p-photo').addEventListener('change', handleP2pPhotoCapture);
       document.getElementById('p2p-speak-description').addEventListener('click', startP2pSpeechDescription);
       document.getElementById('p2p-use-directory').addEventListener('click', useDirectoryForP2p);
+      document.getElementById('p2p-fmv-scan-barcode').addEventListener('click', scanP2pBarcode);
       document.getElementById('p2p-fmv-find-comparables').addEventListener('click', prepareP2pFmvSearchLinks);
       document.getElementById('p2p-fmv-calculate').addEventListener('click', calculateP2pFmvEstimate);
       document.getElementById('p2p-fmv-use-suggestion').addEventListener('click', useP2pFmvSuggestion);
@@ -3894,17 +3897,20 @@
         return null;
       }
 
-      function handleP2pPhotoCapture() {
+      async function handleP2pPhotoCapture() {
         const input = document.getElementById('p2p-photo');
         const file = input.files && input.files[0];
         const preview = document.getElementById('p2p-photo-preview');
         const value = document.getElementById('p2p-photo-value');
         const detail = document.getElementById('p2p-photo-detail');
+        const barcodeButton = document.getElementById('p2p-fmv-scan-barcode');
 
         if (activeP2pPhotoUrl) {
           URL.revokeObjectURL(activeP2pPhotoUrl);
           activeP2pPhotoUrl = null;
         }
+        activeP2pSanitizedPhotoBlob = null;
+        barcodeButton.disabled = true;
 
         if (!file) {
           activeP2pPhotoMeta = null;
@@ -3916,21 +3922,143 @@
           return;
         }
 
-        activeP2pPhotoMeta = {
-          name: file.name || 'camera-capture',
-          type: file.type || 'image/*',
-          size: file.size || 0,
-          captured_at: new Date().toISOString(),
-          stored_in_activity_cache: false,
-          image_bytes_excluded: true,
-          preview_only: true
-        };
-        activeP2pPhotoUrl = URL.createObjectURL(file);
-        preview.src = activeP2pPhotoUrl;
-        preview.style.display = 'block';
-        value.textContent = 'Photo captured';
-        detail.textContent = `${activeP2pPhotoMeta.name}; ${activeP2pPhotoMeta.type}; ${activeP2pPhotoMeta.size} bytes. Image data is preview-only.`;
-        invalidateP2pFmvEstimate({ clearSearchLinks: true });
+        if (!String(file.type || '').startsWith('image/') || file.size > 15 * 1024 * 1024) {
+          activeP2pPhotoMeta = null;
+          preview.removeAttribute('src');
+          preview.style.display = 'none';
+          value.textContent = 'Photo rejected';
+          detail.textContent = 'Choose an image no larger than 15 MB.';
+          invalidateP2pFmvEstimate({ clearSearchLinks: true });
+          return;
+        }
+
+        value.textContent = 'Sanitizing photo';
+        detail.textContent = 'Removing embedded metadata and preparing an in-memory preview.';
+        try {
+          const sanitized = await sanitizeP2pPhoto(file);
+          if (!input.files || input.files[0] !== file) return;
+          const sha256 = await sha256BlobHex(sanitized.blob);
+          activeP2pSanitizedPhotoBlob = sanitized.blob;
+          activeP2pPhotoMeta = {
+            name: file.name || 'camera-capture',
+            type: sanitized.blob.type,
+            size: sanitized.blob.size,
+            original_type: file.type || null,
+            original_size: file.size || 0,
+            width: sanitized.width,
+            height: sanitized.height,
+            captured_at: new Date().toISOString(),
+            sha256,
+            metadata_stripped: true,
+            locally_sanitized: true,
+            stored_in_activity_cache: false,
+            image_bytes_excluded: true,
+            preview_only: true
+          };
+          activeP2pPhotoUrl = URL.createObjectURL(sanitized.blob);
+          preview.src = activeP2pPhotoUrl;
+          preview.style.display = 'block';
+          barcodeButton.disabled = false;
+          value.textContent = 'Photo sanitized';
+          detail.textContent = `${sanitized.width} x ${sanitized.height}; ${sanitized.blob.size} bytes; embedded metadata stripped; SHA-256 ${sha256}. Preview remains in memory only.`;
+          invalidateP2pFmvEstimate({ clearSearchLinks: true });
+        } catch (error) {
+          activeP2pPhotoMeta = null;
+          activeP2pSanitizedPhotoBlob = null;
+          preview.removeAttribute('src');
+          preview.style.display = 'none';
+          value.textContent = 'Photo unavailable';
+          detail.textContent = 'The image could not be decoded safely. Capture another photo or choose a different image.';
+          invalidateP2pFmvEstimate({ clearSearchLinks: true });
+        }
+      }
+
+      async function sanitizeP2pPhoto(file) {
+        let source;
+        let releaseSource = () => {};
+        if (typeof createImageBitmap === 'function') {
+          source = await createImageBitmap(file);
+          releaseSource = () => source.close();
+        } else {
+          const sourceUrl = URL.createObjectURL(file);
+          source = await new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = () => reject(new Error('image_decode_failed'));
+            image.src = sourceUrl;
+          });
+          releaseSource = () => URL.revokeObjectURL(sourceUrl);
+        }
+
+        try {
+          const sourceWidth = source.width || source.naturalWidth;
+          const sourceHeight = source.height || source.naturalHeight;
+          if (!sourceWidth || !sourceHeight) throw new Error('image_dimensions_unavailable');
+          const scale = Math.min(1, 1600 / Math.max(sourceWidth, sourceHeight));
+          const width = Math.max(1, Math.round(sourceWidth * scale));
+          const height = Math.max(1, Math.round(sourceHeight * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext('2d', { alpha: false });
+          if (!context) throw new Error('canvas_unavailable');
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, width, height);
+          context.drawImage(source, 0, 0, width, height);
+          const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob(result => result ? resolve(result) : reject(new Error('image_encode_failed')), 'image/jpeg', 0.86);
+          });
+          return { blob, width, height };
+        } finally {
+          releaseSource();
+        }
+      }
+
+      async function sha256BlobHex(blob) {
+        const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+        return Array.from(new Uint8Array(digest))
+          .map(byte => byte.toString(16).padStart(2, '0'))
+          .join('');
+      }
+
+      async function scanP2pBarcode() {
+        const status = document.getElementById('p2p-fmv-status');
+        if (!activeP2pSanitizedPhotoBlob) {
+          status.textContent = 'Capture and sanitize an item photo before scanning a barcode.';
+          return;
+        }
+        if (!('BarcodeDetector' in window)) {
+          status.textContent = 'Local barcode detection is unavailable in this browser. Enter the model or barcode manually.';
+          return;
+        }
+
+        status.textContent = 'Scanning the sanitized in-memory photo for a barcode...';
+        try {
+          const supported = typeof BarcodeDetector.getSupportedFormats === 'function'
+            ? await BarcodeDetector.getSupportedFormats()
+            : [];
+          const preferred = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'qr_code'];
+          const formats = preferred.filter(format => supported.length === 0 || supported.includes(format));
+          const detector = formats.length > 0 ? new BarcodeDetector({ formats }) : new BarcodeDetector();
+          const image = await createImageBitmap(activeP2pSanitizedPhotoBlob);
+          let detections;
+          try {
+            detections = await detector.detect(image);
+          } finally {
+            image.close();
+          }
+          const match = Array.isArray(detections) ? detections.find(item => String(item.rawValue || '').trim()) : null;
+          if (!match) {
+            status.textContent = 'No barcode found. Adjust lighting or enter the model or barcode manually.';
+            return;
+          }
+          const identifier = String(match.rawValue).trim().slice(0, 120);
+          document.getElementById('p2p-fmv-identifier').value = identifier;
+          invalidateP2pFmvEstimate({ clearSearchLinks: true });
+          status.textContent = `Barcode detected: ${identifier}. Confirm it matches the item before searching.`;
+        } catch (error) {
+          status.textContent = 'Barcode scan could not be completed. Enter the model or barcode manually.';
+        }
       }
 
       function prepareP2pFmvSearchLinks() {
@@ -4363,6 +4491,12 @@
           size: Number.isFinite(Number(photoEvidence.size || photoEvidence.byte_size)) ? Number(photoEvidence.size || photoEvidence.byte_size) : null,
           captured_at: photoEvidence.captured_at || null,
           sha256: photoEvidence.sha256 || null,
+          original_type: photoEvidence.original_type || null,
+          original_size: Number.isFinite(Number(photoEvidence.original_size)) ? Number(photoEvidence.original_size) : null,
+          width: Number.isInteger(Number(photoEvidence.width)) ? Number(photoEvidence.width) : null,
+          height: Number.isInteger(Number(photoEvidence.height)) ? Number(photoEvidence.height) : null,
+          metadata_stripped: photoEvidence.metadata_stripped === true,
+          locally_sanitized: photoEvidence.locally_sanitized === true,
           stored_in_activity_cache: false,
           image_bytes_excluded: true,
           preview_only: true

@@ -690,6 +690,10 @@
                   <option value="poor">Poor</option>
                 </select>
               </label>
+              <label class="full">
+                FMV evidence JSON
+                <input id="p2p-fmv-evidence-file" type="file" accept="application/json,.json">
+              </label>
               <label>
                 Comparable 1 total (btc)
                 <input id="p2p-fmv-comp-1" inputmode="decimal" placeholder="0.00">
@@ -720,6 +724,8 @@
               <button class="secondary" id="p2p-fmv-find-comparables" type="button">Find Comparables</button>
               <button class="secondary" id="p2p-fmv-calculate" type="button">Calculate FMV</button>
               <button class="primary" id="p2p-fmv-use-suggestion" type="button" disabled>Use Suggested PYRA</button>
+              <button class="secondary" id="p2p-fmv-export-evidence" type="button" disabled>Export FMV Evidence</button>
+              <button class="secondary" id="p2p-fmv-import-evidence" type="button">Import FMV Evidence</button>
             </div>
             <div class="fmv-identification">
               <div class="fmv-identification-head">
@@ -1483,6 +1489,8 @@
       document.getElementById('p2p-fmv-find-comparables').addEventListener('click', prepareP2pFmvSearchLinks);
       document.getElementById('p2p-fmv-calculate').addEventListener('click', calculateP2pFmvEstimate);
       document.getElementById('p2p-fmv-use-suggestion').addEventListener('click', useP2pFmvSuggestion);
+      document.getElementById('p2p-fmv-export-evidence').addEventListener('click', exportP2pFmvEvidence);
+      document.getElementById('p2p-fmv-import-evidence').addEventListener('click', importP2pFmvEvidence);
       for (const id of ['p2p-fmv-item', 'p2p-fmv-identifier', 'p2p-fmv-condition', 'p2p-fmv-comp-1', 'p2p-fmv-source-1', 'p2p-fmv-comp-2', 'p2p-fmv-source-2', 'p2p-fmv-comp-3', 'p2p-fmv-source-3']) {
         document.getElementById(id).addEventListener(id === 'p2p-fmv-condition' ? 'change' : 'input', invalidateP2pFmvEstimate);
       }
@@ -4447,6 +4455,7 @@
           </div>
         `;
         document.getElementById('p2p-fmv-use-suggestion').disabled = !suggestedPyra;
+        document.getElementById('p2p-fmv-export-evidence').disabled = false;
         status.textContent = suggestedPyra
           ? `Suggested ${suggestedPyra} PYRA from btc ${formatBtcAmount(median)} using the selected chain's barter-credit snapshot.`
           : `FMV calculated as btc ${formatBtcAmount(median)}. A validated barter-credit snapshot is required for a PYRA suggestion.`;
@@ -4458,9 +4467,151 @@
         document.getElementById('p2p-fmv-status').textContent = 'Suggested PYRA amount placed in the P2P draft. Both members must review and agree before any wallet action.';
       }
 
+      async function exportP2pFmvEvidence() {
+        if (!activeP2pFmvEstimate) return;
+        const status = document.getElementById('p2p-fmv-status');
+        try {
+          const packet = await createP2pFmvEvidencePacket();
+          downloadJson(packet, `pyra-fmv-evidence-${todayIsoDate()}.json`);
+          status.textContent = 'FMV evidence exported with a SHA-256 integrity digest and no image bytes.';
+        } catch (error) {
+          status.textContent = 'FMV evidence could not be exported. Recalculate the estimate and try again.';
+        }
+      }
+
+      async function createP2pFmvEvidencePacket() {
+        if (!activeP2pFmvEstimate) throw new Error('fmv_estimate_required');
+        const evidence = {
+          type: 'pyra_fmv_evidence_packet',
+          version: 1,
+          created_at: new Date().toISOString(),
+          chain_id: document.getElementById('p2p-chain').value,
+          estimate: JSON.parse(JSON.stringify(activeP2pFmvEstimate)),
+          photo_evidence: createP2pFmvPhotoEvidence(activeP2pPhotoMeta),
+          guardrails: {
+            evidence_only: true,
+            member_review_required: true,
+            not_a_certified_appraisal: true,
+            imported_suggestion_not_authoritative: true,
+            photo_image_bytes_excluded: true,
+            kyc_data_excluded: true,
+            no_private_keys_or_seed_phrases: true,
+            no_transaction_signature: true,
+            no_transaction_broadcast: true,
+            sha256_is_integrity_evidence_not_a_digital_signature: true
+          }
+        };
+        return {
+          ...evidence,
+          evidence_sha256: await sha256Hex(stableStringify(evidence))
+        };
+      }
+
+      function createP2pFmvPhotoEvidence(photo) {
+        if (!photo) return null;
+        return {
+          content_type: photo.type || null,
+          byte_size: Number.isFinite(Number(photo.size)) ? Number(photo.size) : null,
+          width: Number.isInteger(Number(photo.width)) ? Number(photo.width) : null,
+          height: Number.isInteger(Number(photo.height)) ? Number(photo.height) : null,
+          captured_at: photo.captured_at || null,
+          sha256: /^[a-f0-9]{64}$/i.test(String(photo.sha256 || '')) ? String(photo.sha256).toLowerCase() : null,
+          metadata_stripped: photo.metadata_stripped === true,
+          locally_sanitized: photo.locally_sanitized === true,
+          image_bytes_excluded: true
+        };
+      }
+
+      async function importP2pFmvEvidence() {
+        const fileInput = document.getElementById('p2p-fmv-evidence-file');
+        const file = fileInput.files && fileInput.files[0];
+        const status = document.getElementById('p2p-fmv-status');
+        if (!file) {
+          status.textContent = 'Select a PYRA FMV evidence JSON file first.';
+          return;
+        }
+        if (file.size > 1024 * 1024) {
+          status.textContent = 'FMV evidence import failed: the JSON file exceeds the 1 MB limit.';
+          return;
+        }
+
+        try {
+          const packet = JSON.parse(await file.text());
+          const estimate = await validateP2pFmvEvidencePacket(packet);
+          populateP2pFmvEvidenceInputs(packet.chain_id, estimate);
+          status.textContent = `FMV evidence integrity verified from ${file.name}. Inputs were loaded for a fresh member-reviewed calculation; the imported suggestion was not activated.`;
+        } catch (error) {
+          status.textContent = `FMV evidence import failed: ${error && error.message ? error.message : 'invalid evidence JSON'}.`;
+        }
+      }
+
+      async function validateP2pFmvEvidencePacket(packet) {
+        if (!packet || packet.type !== 'pyra_fmv_evidence_packet') throw new Error('invalid_fmv_evidence_type');
+        if (packet.version !== 1) throw new Error('unsupported_fmv_evidence_version');
+        const privacyErrors = validateP2pReceiptPrivacy(packet);
+        if (privacyErrors.length > 0) throw new Error(privacyErrors.join(', '));
+        if (!/^[a-f0-9]{64}$/i.test(String(packet.evidence_sha256 || ''))) throw new Error('invalid_fmv_evidence_sha256');
+        const { evidence_sha256: expectedDigest, ...evidence } = packet;
+        const actualDigest = await sha256Hex(stableStringify(evidence));
+        if (actualDigest !== expectedDigest.toLowerCase()) throw new Error('fmv_evidence_integrity_check_failed');
+
+        const estimate = packet.estimate;
+        if (!estimate || estimate.type !== 'pyra_p2p_fmv_estimate' || estimate.version !== 1) throw new Error('invalid_fmv_estimate');
+        if (estimate.method !== 'median_member_reviewed_comparables') throw new Error('unsupported_fmv_method');
+        if (!String(estimate.item_identity || '').trim()) throw new Error('missing_confirmed_item_identity');
+        if (!['new', 'like_new', 'good', 'fair', 'poor'].includes(estimate.condition)) throw new Error('invalid_fmv_condition');
+        if (estimate.btc_usd_accounting_ratio !== '1:1') throw new Error('invalid_fmv_accounting_ratio');
+        const comparables = Array.isArray(estimate.comparables) ? estimate.comparables.slice(0, 3) : [];
+        if (comparables.length < 2 || comparables.some(item => {
+          const total = Number(item && item.total_btc);
+          return !isPositiveDecimal(item && item.total_btc) || !Number.isFinite(total) || total > 1000000000000;
+        })) {
+          throw new Error('invalid_fmv_comparables');
+        }
+        const totals = comparables.map(item => Number(item.total_btc)).sort((left, right) => left - right);
+        const middle = Math.floor(totals.length / 2);
+        const median = totals.length % 2 === 0 ? (totals[middle - 1] + totals[middle]) / 2 : totals[middle];
+        const range = estimate.market_range_btc || {};
+        const marketValue = Number(estimate.market_value_btc);
+        const rangeLow = Number(range.low);
+        const rangeHigh = Number(range.high);
+        if (!Number.isFinite(marketValue) || Math.abs(marketValue - Number(median.toFixed(2))) > 0.001) throw new Error('fmv_median_mismatch');
+        if (!Number.isFinite(rangeLow) || !Number.isFinite(rangeHigh) || Math.abs(rangeLow - Number(totals[0].toFixed(2))) > 0.001 || Math.abs(rangeHigh - Number(totals[totals.length - 1].toFixed(2))) > 0.001) {
+          throw new Error('fmv_range_mismatch');
+        }
+        if (!Array.from(document.getElementById('p2p-chain').options).some(option => option.value === packet.chain_id)) {
+          throw new Error('unsupported_fmv_chain');
+        }
+        if (packet.photo_evidence) {
+          if (!/^[a-f0-9]{64}$/i.test(String(packet.photo_evidence.sha256 || ''))) throw new Error('invalid_fmv_photo_sha256');
+          if (packet.photo_evidence.content_type !== 'image/jpeg' || !Number.isInteger(Number(packet.photo_evidence.width)) || !Number.isInteger(Number(packet.photo_evidence.height)) || Number(packet.photo_evidence.width) < 1 || Number(packet.photo_evidence.height) < 1 || !Number.isFinite(Number(packet.photo_evidence.byte_size)) || Number(packet.photo_evidence.byte_size) < 1) {
+            throw new Error('invalid_fmv_photo_metadata');
+          }
+          if (packet.photo_evidence.metadata_stripped !== true || packet.photo_evidence.locally_sanitized !== true || packet.photo_evidence.image_bytes_excluded !== true) {
+            throw new Error('invalid_fmv_photo_guardrails');
+          }
+        }
+        return { ...estimate, comparables };
+      }
+
+      function populateP2pFmvEvidenceInputs(chainId, estimate) {
+        document.getElementById('p2p-chain').value = chainId;
+        syncPricingModeFromChain(chainId);
+        document.getElementById('p2p-fmv-item').value = String(estimate.item_identity).slice(0, 300);
+        document.getElementById('p2p-fmv-identifier').value = String(estimate.identifier || '').slice(0, 120);
+        document.getElementById('p2p-fmv-condition').value = estimate.condition;
+        for (let index = 1; index <= 3; index += 1) {
+          const comparable = estimate.comparables[index - 1];
+          document.getElementById(`p2p-fmv-comp-${index}`).value = comparable ? String(comparable.total_btc) : '';
+          document.getElementById(`p2p-fmv-source-${index}`).value = comparable ? String(comparable.source || comparable.source_url || '').slice(0, 1000) : '';
+        }
+        invalidateP2pFmvEstimate({ clearSearchLinks: true });
+      }
+
       function invalidateP2pFmvEstimate(options = {}) {
         activeP2pFmvEstimate = null;
         document.getElementById('p2p-fmv-use-suggestion').disabled = true;
+        document.getElementById('p2p-fmv-export-evidence').disabled = true;
         document.getElementById('p2p-fmv-result').innerHTML = '';
         const changedField = options.target && options.target.id;
         if (options.clearSearchLinks || ['p2p-fmv-item', 'p2p-fmv-identifier', 'p2p-fmv-condition'].includes(changedField)) {
@@ -4786,6 +4937,9 @@
           'imageBytes',
           'image_data',
           'imageData',
+          'image_base64',
+          'imageBase64',
+          'photo_image_base64',
           'data_url',
           'dataUrl',
           'base64',
@@ -4797,6 +4951,11 @@
           'mnemonic',
           'kyc_document',
           'kycDocuments',
+          'identity_document',
+          'identityDocument',
+          'ssn',
+          'ssn_tin',
+          'id_number',
           'document_contents',
           'documentContents',
           'id_front',

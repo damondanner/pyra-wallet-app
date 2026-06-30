@@ -46,6 +46,14 @@
       "endpoint": "/api/member-status",
       "method": "GET",
       "source": "disabled_until_controlled_roster_storage"
+    },
+    "fmvIdentification": {
+      "enabled": false,
+      "baseUrl": "",
+      "providersEndpoint": "/api/p2p/fmv/providers",
+      "identifyEndpoint": "/api/p2p/fmv/identify",
+      "providerTermsUrl": "",
+      "source": "disabled_until_reviewed_provider_and_api_origin"
     }
   },
   "memberStatuses": {

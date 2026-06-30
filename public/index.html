@@ -383,6 +383,45 @@
         font-size: 13px;
       }
 
+      .fmv-identification {
+        margin-top: 16px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        padding: 16px 0;
+      }
+
+      .fmv-identification-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .consent-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .consent-row {
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        font-weight: 700;
+        line-height: 1.4;
+      }
+
+      .consent-row input {
+        width: 18px;
+        min-height: 18px;
+        margin: 1px 0 0;
+      }
+
+      .consent-row a {
+        color: var(--green);
+      }
+
       .full-value {
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -681,6 +720,33 @@
               <button class="secondary" id="p2p-fmv-find-comparables" type="button">Find Comparables</button>
               <button class="secondary" id="p2p-fmv-calculate" type="button">Calculate FMV</button>
               <button class="primary" id="p2p-fmv-use-suggestion" type="button" disabled>Use Suggested PYRA</button>
+            </div>
+            <div class="fmv-identification">
+              <div class="fmv-identification-head">
+                <div>
+                  <h3>AI Item Identification</h3>
+                  <p class="small-note" id="p2p-fmv-identify-status">AI identification is not configured. Local barcode and manual comparable tools remain available.</p>
+                </div>
+                <span class="tag pending" id="p2p-fmv-provider-tag">not configured</span>
+              </div>
+              <div class="consent-list">
+                <label class="consent-row">
+                  <input id="p2p-fmv-item-only-consent" type="checkbox">
+                  <span>I confirm this sanitized photo shows an item only, with no person or identity document.</span>
+                </label>
+                <label class="consent-row">
+                  <input id="p2p-fmv-external-consent" type="checkbox">
+                  <span>I consent to sending this sanitized in-memory photo to the configured item-identification provider.</span>
+                </label>
+                <label class="consent-row">
+                  <input id="p2p-fmv-terms-consent" type="checkbox">
+                  <span>I reviewed the provider terms and image-retention notice.<a id="p2p-fmv-provider-terms" href="#" target="_blank" rel="noopener noreferrer" hidden> Review provider terms</a></span>
+                </label>
+              </div>
+              <div class="actions" style="margin-top: 12px;">
+                <button class="secondary" id="p2p-fmv-identify" type="button" disabled>Identify Item</button>
+              </div>
+              <div class="chain-list" id="p2p-fmv-identify-results" style="margin-top: 12px;"></div>
             </div>
             <div class="chain-list" id="p2p-fmv-search-links" style="margin-top: 12px;"></div>
             <div class="chain-list" id="p2p-fmv-result" style="margin-top: 12px;"></div>
@@ -1305,6 +1371,9 @@
       let activeP2pSanitizedPhotoBlob = null;
       let activeP2pReceipt = null;
       let activeP2pFmvEstimate = null;
+      let p2pFmvVisionConfig = null;
+      let p2pFmvVisionProviderStatus = null;
+      let activeP2pIdentityCandidates = [];
       let activeEmergencyIou = null;
       let emergencyQrScanStream = null;
       let emergencyQrScanTimer = null;
@@ -1406,6 +1475,11 @@
       document.getElementById('p2p-speak-description').addEventListener('click', startP2pSpeechDescription);
       document.getElementById('p2p-use-directory').addEventListener('click', useDirectoryForP2p);
       document.getElementById('p2p-fmv-scan-barcode').addEventListener('click', scanP2pBarcode);
+      document.getElementById('p2p-fmv-identify').addEventListener('click', identifyP2pItem);
+      document.getElementById('p2p-fmv-identify-results').addEventListener('click', useP2pIdentityCandidate);
+      for (const id of ['p2p-fmv-item-only-consent', 'p2p-fmv-external-consent', 'p2p-fmv-terms-consent']) {
+        document.getElementById(id).addEventListener('change', updateP2pIdentificationReadiness);
+      }
       document.getElementById('p2p-fmv-find-comparables').addEventListener('click', prepareP2pFmvSearchLinks);
       document.getElementById('p2p-fmv-calculate').addEventListener('click', calculateP2pFmvEstimate);
       document.getElementById('p2p-fmv-use-suggestion').addEventListener('click', useP2pFmvSuggestion);
@@ -1700,6 +1774,7 @@
           if (!response.ok) throw new Error(`config HTTP ${response.status}`);
           const config = await response.json();
           walletConfig = config;
+          await configureP2pFmvIdentification(config);
           renderChains(config.chains.map(fromConfigChain));
           renderCandidateChains(config.chainExpansion.candidates.map(fromConfigCandidateChain), config.chainExpansion);
           updateMemberStatusOptions(config);
@@ -1712,6 +1787,7 @@
           updateTokenAction();
           updateSendReadiness();
         } catch (error) {
+          await configureP2pFmvIdentification(null);
           renderChains(chains);
           renderCandidateChains(candidateChains, {
             maxTargetChains: 10,
@@ -3911,6 +3987,8 @@
         }
         activeP2pSanitizedPhotoBlob = null;
         barcodeButton.disabled = true;
+        clearP2pIdentityCandidates();
+        updateP2pIdentificationReadiness();
 
         if (!file) {
           activeP2pPhotoMeta = null;
@@ -3961,6 +4039,7 @@
           barcodeButton.disabled = false;
           value.textContent = 'Photo sanitized';
           detail.textContent = `${sanitized.width} x ${sanitized.height}; ${sanitized.blob.size} bytes; embedded metadata stripped; SHA-256 ${sha256}. Preview remains in memory only.`;
+          updateP2pIdentificationReadiness();
           invalidateP2pFmvEstimate({ clearSearchLinks: true });
         } catch (error) {
           activeP2pPhotoMeta = null;
@@ -3969,6 +4048,7 @@
           preview.style.display = 'none';
           value.textContent = 'Photo unavailable';
           detail.textContent = 'The image could not be decoded safely. Capture another photo or choose a different image.';
+          updateP2pIdentificationReadiness();
           invalidateP2pFmvEstimate({ clearSearchLinks: true });
         }
       }
@@ -4019,6 +4099,201 @@
         return Array.from(new Uint8Array(digest))
           .map(byte => byte.toString(16).padStart(2, '0'))
           .join('');
+      }
+
+      async function configureP2pFmvIdentification(config) {
+        const candidate = config && config.api && config.api.fmvIdentification;
+        p2pFmvVisionConfig = candidate && candidate.enabled === true ? candidate : null;
+        p2pFmvVisionProviderStatus = null;
+        const termsLink = document.getElementById('p2p-fmv-provider-terms');
+        const termsUrl = p2pFmvVisionConfig && normalizeHttpsUrl(p2pFmvVisionConfig.providerTermsUrl);
+        termsLink.hidden = !termsUrl;
+        if (termsUrl) termsLink.href = termsUrl;
+        else termsLink.removeAttribute('href');
+
+        if (!p2pFmvVisionConfig || !termsUrl) {
+          renderP2pFmvProviderStatus('not configured', 'AI identification is not configured. Local barcode and manual comparable tools remain available.', false);
+          updateP2pIdentificationReadiness();
+          return;
+        }
+
+        renderP2pFmvProviderStatus('checking', 'Checking the configured item-identification provider.', false);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        try {
+          const url = resolveWalletApiUrl(p2pFmvVisionConfig.baseUrl, p2pFmvVisionConfig.providersEndpoint);
+          const response = await fetch(url, { headers: { accept: 'application/json' }, cache: 'no-store', signal: controller.signal });
+          if (!response.ok) throw new Error(`provider status HTTP ${response.status}`);
+          const payload = await response.json();
+          const vision = payload && payload.providers && payload.providers.vision;
+          if (!vision || vision.configured !== true) throw new Error('vision provider unavailable');
+          p2pFmvVisionProviderStatus = vision;
+          renderP2pFmvProviderStatus('ready', 'A reviewed provider is available. Capture an item-only photo and complete each consent before identification.', true);
+        } catch (error) {
+          renderP2pFmvProviderStatus('unavailable', 'AI identification is temporarily unavailable. Local barcode and manual comparable tools remain available.', false);
+        } finally {
+          clearTimeout(timeout);
+        }
+        updateP2pIdentificationReadiness();
+      }
+
+      function renderP2pFmvProviderStatus(label, message, ready) {
+        const tag = document.getElementById('p2p-fmv-provider-tag');
+        tag.textContent = label;
+        tag.className = ready ? 'tag ready' : 'tag pending';
+        document.getElementById('p2p-fmv-identify-status').textContent = message;
+      }
+
+      function updateP2pIdentificationReadiness() {
+        const button = document.getElementById('p2p-fmv-identify');
+        const termsLink = document.getElementById('p2p-fmv-provider-terms');
+        const consent = getP2pFmvConsent();
+        const consentComplete = Object.values(consent).every(Boolean);
+        const providerReady = Boolean(p2pFmvVisionConfig && p2pFmvVisionProviderStatus && !termsLink.hidden);
+        button.disabled = !(providerReady && activeP2pSanitizedPhotoBlob && activeP2pPhotoMeta && consentComplete);
+      }
+
+      function getP2pFmvConsent() {
+        return {
+          external_ai_processing: document.getElementById('p2p-fmv-external-consent').checked,
+          item_photo_only: document.getElementById('p2p-fmv-item-only-consent').checked,
+          no_people_or_identity_documents: document.getElementById('p2p-fmv-item-only-consent').checked,
+          provider_terms_acknowledged: document.getElementById('p2p-fmv-terms-consent').checked
+        };
+      }
+
+      async function identifyP2pItem() {
+        const status = document.getElementById('p2p-fmv-identify-status');
+        if (!p2pFmvVisionConfig || !p2pFmvVisionProviderStatus) {
+          status.textContent = 'AI identification is not configured. Use local barcode detection or enter the item identity manually.';
+          return;
+        }
+        if (!activeP2pSanitizedPhotoBlob || !activeP2pPhotoMeta) {
+          status.textContent = 'Capture and sanitize an item-only photo before identification.';
+          return;
+        }
+        const consent = getP2pFmvConsent();
+        if (!Object.values(consent).every(Boolean)) {
+          status.textContent = 'Complete every item-only, external-processing, and provider-terms acknowledgement before identification.';
+          return;
+        }
+        const maxBytes = Number(p2pFmvVisionProviderStatus.max_image_bytes || 0);
+        if (maxBytes > 0 && activeP2pSanitizedPhotoBlob.size > maxBytes) {
+          status.textContent = 'The sanitized photo exceeds the configured provider limit. Capture a simpler or smaller image.';
+          return;
+        }
+
+        const button = document.getElementById('p2p-fmv-identify');
+        button.disabled = true;
+        clearP2pIdentityCandidates();
+        status.textContent = 'Sending the sanitized item photo for identification. No KYC document or wallet secret is included.';
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 25000);
+        try {
+          const imageBase64 = await blobToBase64(activeP2pSanitizedPhotoBlob);
+          const url = resolveWalletApiUrl(p2pFmvVisionConfig.baseUrl, p2pFmvVisionConfig.identifyEndpoint);
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { accept: 'application/json', 'content-type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              description: document.getElementById('p2p-description').value.trim(),
+              consent,
+              image: {
+                content_type: 'image/jpeg',
+                image_base64: imageBase64,
+                sha256: activeP2pPhotoMeta.sha256,
+                width: activeP2pPhotoMeta.width,
+                height: activeP2pPhotoMeta.height,
+                metadata_stripped: true,
+                locally_sanitized: true
+              }
+            })
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(payload.error || `identification HTTP ${response.status}`);
+          activeP2pIdentityCandidates = Array.isArray(payload.candidates) ? payload.candidates.slice(0, 5) : [];
+          renderP2pIdentityCandidates();
+          status.textContent = activeP2pIdentityCandidates.length
+            ? 'Review the suggestions and choose one only if it matches the item.'
+            : 'No reliable item suggestion was returned. Enter the item identity manually.';
+        } catch (error) {
+          clearP2pIdentityCandidates();
+          status.textContent = error && error.name === 'AbortError'
+            ? 'Item identification timed out. The photo remains available locally for another attempt.'
+            : 'Item identification could not be completed. Use local barcode detection or enter the item identity manually.';
+        } finally {
+          clearTimeout(timeout);
+          updateP2pIdentificationReadiness();
+        }
+      }
+
+      async function blobToBase64(blob) {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(new Error('image_read_failed'));
+          reader.readAsDataURL(blob);
+        });
+        const marker = dataUrl.indexOf(',');
+        if (marker < 0) throw new Error('image_base64_unavailable');
+        return dataUrl.slice(marker + 1);
+      }
+
+      function renderP2pIdentityCandidates() {
+        const container = document.getElementById('p2p-fmv-identify-results');
+        container.innerHTML = activeP2pIdentityCandidates.map((candidate, index) => {
+          const identity = escapeHtml(candidate.item_identity || 'Unlabeled item');
+          const details = [candidate.brand, candidate.model, candidate.gtin, candidate.category].filter(Boolean).map(escapeHtml).join(' / ');
+          const confidence = Number.isFinite(Number(candidate.confidence)) ? `${Math.round(Number(candidate.confidence) * 100)}% confidence` : 'confidence unavailable';
+          return `
+            <div class="activity-row">
+              <div>
+                <strong>${identity}</strong>
+                <p>${details || 'No additional identifiers returned'}; ${escapeHtml(confidence)}.</p>
+              </div>
+              <button class="secondary" type="button" data-fmv-candidate-index="${index}">Use Identity</button>
+              <span class="tag pending">review</span>
+            </div>
+          `;
+        }).join('');
+      }
+
+      function useP2pIdentityCandidate(event) {
+        const button = event.target.closest('[data-fmv-candidate-index]');
+        if (!button) return;
+        const candidate = activeP2pIdentityCandidates[Number(button.dataset.fmvCandidateIndex)];
+        if (!candidate || !candidate.item_identity) return;
+        document.getElementById('p2p-fmv-item').value = candidate.item_identity;
+        const identifier = candidate.gtin || candidate.model || '';
+        if (identifier) document.getElementById('p2p-fmv-identifier').value = identifier;
+        invalidateP2pFmvEstimate({ clearSearchLinks: true });
+        document.getElementById('p2p-fmv-identify-status').textContent = 'Suggestion placed in the FMV form. Confirm the identity and condition before reviewing comparables.';
+      }
+
+      function clearP2pIdentityCandidates() {
+        activeP2pIdentityCandidates = [];
+        document.getElementById('p2p-fmv-identify-results').innerHTML = '';
+      }
+
+      function resolveWalletApiUrl(baseUrl, endpoint) {
+        const base = String(baseUrl || '').trim();
+        const path = String(endpoint || '').trim();
+        if (!base || !path) throw new Error('wallet_api_not_configured');
+        const url = new URL(path, base);
+        if (url.protocol !== 'https:' && url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
+          throw new Error('wallet_api_https_required');
+        }
+        return url.href;
+      }
+
+      function normalizeHttpsUrl(value) {
+        try {
+          const url = new URL(String(value || ''));
+          return url.protocol === 'https:' ? url.href : null;
+        } catch (error) {
+          return null;
+        }
       }
 
       async function scanP2pBarcode() {

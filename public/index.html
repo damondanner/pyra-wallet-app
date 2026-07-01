@@ -1197,9 +1197,12 @@
               <button class="secondary" id="export-activity-json" type="button">Export JSON</button>
               <button class="secondary" id="export-activity-csv" type="button">Export CSV</button>
               <button class="secondary" id="export-annual-summary" type="button">Export Annual Summary</button>
+              <button class="secondary" id="export-trade-evidence-json" type="button">Export Evidence JSON</button>
+              <button class="secondary" id="export-trade-evidence-csv" type="button">Export Evidence CSV</button>
               <button class="secondary" id="clear-local-activity" type="button">Clear Local Drafts</button>
             </div>
             <p class="small-note" id="activity-storage-status">Draft records are saved in this browser only.</p>
+            <p class="small-note" id="trade-evidence-status">Evidence reports use the selected summary year and current activity filters.</p>
             <div class="chain-list" id="activity-summary" style="margin-top: 14px;"></div>
             <div class="chain-list" id="activity-list" style="margin-top: 14px;"></div>
           </section>
@@ -1465,6 +1468,8 @@
       document.getElementById('export-activity-json').addEventListener('click', exportActivityJson);
       document.getElementById('export-activity-csv').addEventListener('click', exportActivityCsv);
       document.getElementById('export-annual-summary').addEventListener('click', exportAnnualActivitySummary);
+      document.getElementById('export-trade-evidence-json').addEventListener('click', exportWalletTradeEvidenceJson);
+      document.getElementById('export-trade-evidence-csv').addEventListener('click', exportWalletTradeEvidenceCsv);
       document.getElementById('clear-local-activity').addEventListener('click', clearLocalActivityRecords);
       document.getElementById('activity-filter-status').addEventListener('change', renderActivityRecords);
       document.getElementById('activity-filter-chain').addEventListener('change', renderActivityRecords);
@@ -7434,6 +7439,278 @@
           chain: document.getElementById('activity-filter-chain').value,
           search: document.getElementById('activity-search').value.trim()
         };
+      }
+
+      async function exportWalletTradeEvidenceJson() {
+        try {
+          const report = await createWalletTradeEvidenceReport(getTradeEvidenceYear());
+          downloadJson(report, `pyra-trade-evidence-report-${report.period_start}-${report.period_end}.json`);
+          updateTradeEvidenceStatus(`Evidence report exported with ${report.summary.evidence_item_count} item(s).`);
+        } catch (error) {
+          updateTradeEvidenceStatus(`Evidence report could not be exported: ${error.message}.`);
+        }
+      }
+
+      async function exportWalletTradeEvidenceCsv() {
+        try {
+          const report = await createWalletTradeEvidenceReport(getTradeEvidenceYear());
+          downloadText(createWalletTradeEvidenceCsv(report), `pyra-trade-evidence-report-${report.period_start}-${report.period_end}.csv`, 'text/csv');
+          updateTradeEvidenceStatus(`Evidence report CSV exported with ${report.summary.evidence_item_count} item(s).`);
+        } catch (error) {
+          updateTradeEvidenceStatus(`Evidence report CSV could not be exported: ${error.message}.`);
+        }
+      }
+
+      function getTradeEvidenceYear() {
+        const year = Number.parseInt(document.getElementById('activity-summary-year').value, 10);
+        if (!Number.isInteger(year) || year < 2009 || year > 2100) throw new Error('enter a valid summary year');
+        return year;
+      }
+
+      async function createWalletTradeEvidenceReport(year) {
+        const currentYear = new Date().getFullYear();
+        const activitySource = getFilteredActivityRecords().filter(record => getActivityRecordYear(record) === year);
+        const receiptYear = activeP2pReceipt ? getEvidenceYear(activeP2pReceipt.created_at) : null;
+        const p2pSource = activeP2pReceipt && receiptYear === year ? [JSON.parse(JSON.stringify(activeP2pReceipt))] : [];
+        const timeBankDate = activeTimeBankSession && (
+          activeTimeBankSession.stoppedAt || activeTimeBankSession.stopped_at ||
+          activeTimeBankSession.startedAt || activeTimeBankSession.started_at
+        );
+        const timeBankYear = getEvidenceYear(timeBankDate);
+        const timeBankSource = activeTimeBankSession && (timeBankYear === year || (!timeBankYear && year === currentYear))
+          ? [JSON.parse(JSON.stringify(activeTimeBankSession))]
+          : [];
+        const fmvSource = [];
+
+        if (activeP2pFmvEstimate && year === currentYear) {
+          const packet = await createP2pFmvEvidencePacket();
+          await validateP2pFmvEvidencePacket(packet);
+          fmvSource.push(packet);
+        }
+
+        const source = {
+          type: 'pyra_wallet_trade_evidence_source',
+          version: 1,
+          report_id: `trade-evidence-${year}-${Date.now()}`,
+          member_id: currentAccount || (activeP2pReceipt && activeP2pReceipt.member_id) || (activeTimeBankSession && activeTimeBankSession.memberId) || 'wallet_not_connected',
+          period_start: `${year}-01-01`,
+          period_end: `${year}-12-31`,
+          filter: getActivityFilterState(),
+          p2p_receipts: p2pSource,
+          time_bank_sessions: timeBankSource,
+          fmv_evidence_packets: fmvSource,
+          activity_records: activitySource
+        };
+        const sourceEvidenceSha256 = await sha256Hex(stableStringify(source));
+        const p2pReceipts = p2pSource.map(createWalletP2pEvidenceEntry);
+        const timeBankSessions = timeBankSource.map(createWalletTimeBankEvidenceEntry);
+        const fmvEvidencePackets = fmvSource.map(createWalletFmvEvidenceEntry);
+        const activityReferences = activitySource.map(createWalletActivityEvidenceEntry);
+        const allEvidence = [...p2pReceipts, ...timeBankSessions, ...fmvEvidencePackets, ...activityReferences];
+        if (allEvidence.length === 0) throw new Error('no evidence exists for the selected year and filters');
+
+        const report = {
+          type: 'pyra_trade_evidence_report',
+          version: 1,
+          report_id: source.report_id,
+          member_id: source.member_id,
+          period_start: source.period_start,
+          period_end: source.period_end,
+          generated_at: new Date().toISOString(),
+          source_evidence_sha256: sourceEvidenceSha256,
+          summary: {
+            evidence_item_count: allEvidence.length,
+            p2p_receipt_count: p2pReceipts.length,
+            time_bank_session_count: timeBankSessions.length,
+            fmv_evidence_packet_count: fmvEvidencePackets.length,
+            activity_reference_count: activityReferences.length,
+            speech_transcript_count: p2pReceipts.filter(item => item.description_source === 'speech_transcript').length,
+            photo_hash_count: [...p2pReceipts, ...fmvEvidencePackets, ...activityReferences].filter(item => item.photo_evidence && item.photo_evidence.sha256).length,
+            confirmed_chain_reference_count: activityReferences.filter(item => item.status === 'confirmed' && item.transaction_reference).length,
+            p2p_receipt_total_pyra: sumEvidenceAmounts(p2pReceipts.map(item => item.amount_pyra)),
+            time_bank_total_pyra: sumEvidenceAmounts(timeBankSessions.map(item => item.amount_pyra)),
+            undated_evidence_count: allEvidence.filter(item => !(item.created_at || item.occurred_at)).length
+          },
+          p2p_receipts: p2pReceipts,
+          time_bank_sessions: timeBankSessions,
+          fmv_evidence_packets: fmvEvidencePackets,
+          activity_references: activityReferences,
+          guardrails: {
+            member_controlled_evidence_report: true,
+            evidence_inventory_only: true,
+            not_tax_advice_or_a_tax_filing: true,
+            draft_or_review_status_does_not_prove_settlement: true,
+            confirmed_chain_reference_requires_confirmed_activity_status: true,
+            voice_audio_excluded_transcript_text_only: true,
+            photo_image_bytes_excluded: true,
+            kyc_data_excluded: true,
+            no_private_keys_or_seed_phrases: true,
+            no_transaction_signature: true,
+            no_transaction_broadcast: true,
+            no_token_transfer: true,
+            p2p_and_time_bank_totals_kept_separate: true
+          }
+        };
+        report.report_evidence_sha256 = await sha256Hex(stableStringify(report));
+        return report;
+      }
+
+      function createWalletP2pEvidenceEntry(receipt) {
+        const descriptionSource = ['typed', 'speech_transcript', 'typed_or_spoken'].includes(receipt.description_source)
+          ? receipt.description_source
+          : 'typed_or_spoken';
+        return {
+          type: 'pyra_p2p_exchange_receipt_evidence',
+          evidence_id: String(receipt.activity_record_id),
+          created_at: normalizeEvidenceDateTime(receipt.created_at),
+          member_id: String(receipt.member_id),
+          counterparty_id: String(receipt.counterparty_id),
+          chain_id: String(receipt.chain_id),
+          amount_pyra: normalizeEvidenceAmount(receipt.amount),
+          description: truncateEvidenceText(receipt.description, 2000),
+          description_source: descriptionSource,
+          photo_evidence: normalizeWalletTradePhotoEvidence(receipt.photo_evidence),
+          fmv_estimate_present: Boolean(receipt.fmv_pricing_assistant),
+          status: 'review_required',
+          transaction_reference: null
+        };
+      }
+
+      function createWalletTimeBankEvidenceEntry(session) {
+        return {
+          type: 'pyra_time_bank_session_evidence',
+          evidence_id: String(session.id),
+          occurred_at: normalizeEvidenceDateTime(session.stoppedAt || session.stopped_at || session.startedAt || session.started_at),
+          member_id: String(session.memberId || session.member_id),
+          counterparty_id: String(session.counterpartyId || session.counterparty_id),
+          minutes: Number(session.minutes),
+          hourly_rate_btc: normalizeEvidenceAmount(session.hourlyRate || session.hourly_rate),
+          amount_pyra: normalizeEvidenceAmount(session.pyraAmount || session.pyra_amount),
+          rate_source: String(session.rateSource || session.rate_source || ''),
+          custom_rate: Boolean(session.customRate || session.custom_rate),
+          location_label: truncateEvidenceText(session.locationLabel || session.location_label, 300),
+          description: truncateEvidenceText(session.notes, 2000),
+          status: String(session.status || 'review_required'),
+          transaction_reference: null
+        };
+      }
+
+      function createWalletFmvEvidenceEntry(packet) {
+        const estimate = packet.estimate;
+        return {
+          type: 'pyra_fmv_packet_evidence',
+          evidence_id: String(packet.evidence_sha256).toLowerCase(),
+          created_at: normalizeEvidenceDateTime(packet.created_at),
+          chain_id: packet.chain_id || null,
+          item_identity: truncateEvidenceText(estimate.item_identity, 300),
+          identifier: truncateEvidenceText(estimate.identifier, 120),
+          condition: estimate.condition || null,
+          market_value_btc: normalizeEvidenceAmount(estimate.market_value_btc),
+          market_range_btc: {
+            low: normalizeEvidenceAmount(estimate.market_range_btc.low),
+            high: normalizeEvidenceAmount(estimate.market_range_btc.high)
+          },
+          comparable_count: estimate.comparables.length,
+          photo_evidence: normalizeWalletTradePhotoEvidence(packet.photo_evidence),
+          evidence_sha256: String(packet.evidence_sha256).toLowerCase(),
+          integrity_verified: true,
+          status: 'member_review_evidence'
+        };
+      }
+
+      function createWalletActivityEvidenceEntry(record) {
+        return {
+          type: 'pyra_activity_reference_evidence',
+          evidence_id: String(record.id),
+          occurred_at: normalizeEvidenceDateTime(record.occurredAt || record.recordedAt),
+          activity_type: record.type || null,
+          direction: record.direction,
+          status: record.status,
+          member_id: String(record.memberId || 'wallet_not_connected'),
+          counterparty_id: record.counterpartyId || null,
+          chain_id: record.chainId || null,
+          amount_pyra: parsePositiveNumber(record.amount) === null ? null : normalizeEvidenceAmount(record.amount),
+          description: truncateEvidenceText(record.notes, 2000),
+          photo_evidence: normalizeWalletTradePhotoEvidence(record.photoEvidence),
+          transaction_reference: record.status === 'confirmed' && record.transactionHash
+            ? truncateEvidenceText(record.transactionHash, 160)
+            : null
+        };
+      }
+
+      function normalizeWalletTradePhotoEvidence(value) {
+        if (!value || typeof value !== 'object') return null;
+        return {
+          content_type: value.content_type || value.type || null,
+          byte_size: Number.isInteger(Number(value.byte_size || value.size)) ? Number(value.byte_size || value.size) : null,
+          width: Number.isInteger(Number(value.width)) ? Number(value.width) : null,
+          height: Number.isInteger(Number(value.height)) ? Number(value.height) : null,
+          captured_at: normalizeEvidenceDateTime(value.captured_at),
+          sha256: /^[a-f0-9]{64}$/i.test(String(value.sha256 || '')) ? String(value.sha256).toLowerCase() : null,
+          metadata_stripped: value.metadata_stripped === true,
+          locally_sanitized: value.locally_sanitized === true,
+          image_bytes_excluded: true
+        };
+      }
+
+      function createWalletTradeEvidenceCsv(report) {
+        const columns = [
+          'evidence_type', 'evidence_id', 'occurred_at', 'chain_id', 'amount_pyra', 'status',
+          'description', 'description_source', 'photo_sha256', 'evidence_sha256', 'transaction_reference'
+        ];
+        const rows = [];
+        report.p2p_receipts.forEach(item => rows.push(createWalletTradeEvidenceCsvRow('p2p_receipt', item)));
+        report.time_bank_sessions.forEach(item => rows.push(createWalletTradeEvidenceCsvRow('time_bank_session', item)));
+        report.fmv_evidence_packets.forEach(item => rows.push(createWalletTradeEvidenceCsvRow('fmv_evidence', item)));
+        report.activity_references.forEach(item => rows.push(createWalletTradeEvidenceCsvRow('activity_reference', item)));
+        return `${[columns.join(','), ...rows.map(row => columns.map(column => csvEscape(row[column])).join(','))].join('\n')}\n`;
+      }
+
+      function createWalletTradeEvidenceCsvRow(evidenceType, item) {
+        return {
+          evidence_type: evidenceType,
+          evidence_id: item.evidence_id,
+          occurred_at: item.occurred_at || item.created_at,
+          chain_id: item.chain_id,
+          amount_pyra: item.amount_pyra || item.market_value_btc,
+          status: item.status,
+          description: item.description || item.item_identity,
+          description_source: item.description_source,
+          photo_sha256: item.photo_evidence && item.photo_evidence.sha256,
+          evidence_sha256: item.evidence_sha256,
+          transaction_reference: item.transaction_reference
+        };
+      }
+
+      function normalizeEvidenceDateTime(value) {
+        if (!value) return null;
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? null : date.toISOString();
+      }
+
+      function normalizeEvidenceAmount(value) {
+        const amount = parsePositiveNumber(value);
+        if (amount === null) throw new Error('invalid evidence amount');
+        return Number(amount.toFixed(8)).toString();
+      }
+
+      function sumEvidenceAmounts(values) {
+        return Number(values.reduce((sum, value) => sum + Number(value || 0), 0).toFixed(8)).toString();
+      }
+
+      function truncateEvidenceText(value, limit) {
+        const text = String(value || '').trim();
+        return text ? text.slice(0, limit) : null;
+      }
+
+      function getEvidenceYear(value) {
+        if (!value) return null;
+        const timestamp = Date.parse(value);
+        return Number.isFinite(timestamp) ? new Date(timestamp).getFullYear() : null;
+      }
+
+      function updateTradeEvidenceStatus(message) {
+        document.getElementById('trade-evidence-status').textContent = message;
       }
 
       function downloadJson(payload, filename) {

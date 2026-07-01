@@ -873,6 +873,7 @@
                     <option value="all">All IOUs</option>
                     <option value="unsettled">Unsettled</option>
                     <option value="settlement_prepared">Settlement prepared</option>
+                    <option value="settlement_evidence_recorded">Evidence recorded</option>
                     <option value="settled">Settled</option>
                     <option value="disputed">Disputed</option>
                   </select>
@@ -5354,7 +5355,7 @@
           throw new Error('invalid_emergency_created_at');
         }
         const settlementStatus = payload.settlement_status || 'unsettled';
-        if (!['unsettled', 'settlement_prepared', 'settled', 'disputed'].includes(settlementStatus)) {
+        if (!['unsettled', 'settlement_prepared', 'settlement_evidence_recorded', 'settled', 'disputed'].includes(settlementStatus)) {
           throw new Error('invalid_emergency_settlement_status');
         }
         if (payload.settlement_reference != null && !isBoundedEmergencyText(payload.settlement_reference, 256)) {
@@ -6162,6 +6163,10 @@
           ...normalized,
           settlement_status: preservedStatus,
           settlement_reference: existing ? existing.settlement_reference || null : normalized.settlement_reference,
+          settlement_reference_kind: existing ? existing.settlement_reference_kind || null : normalized.settlement_reference_kind,
+          settlement_evidence_recorded_at: existing
+            ? existing.settlement_evidence_recorded_at || null
+            : normalized.settlement_evidence_recorded_at,
           settled_at: existing ? existing.settled_at || null : normalized.settled_at,
           status_updated_at: existing ? existing.status_updated_at || null : normalized.status_updated_at,
           handoff_acknowledgements: mergeEmergencyHandoffAcknowledgements(
@@ -6212,7 +6217,6 @@
                 <button class="secondary" type="button" data-emergency-iou-action="use" data-emergency-iou-id="${escapeHtml(iou.id)}">Use</button>
                 <button class="secondary" type="button" data-emergency-iou-action="settle" data-emergency-iou-id="${escapeHtml(iou.id)}">Prepare</button>
                 <button class="secondary" type="button" data-emergency-iou-action="record-settlement" data-emergency-iou-id="${escapeHtml(iou.id)}">Record Settlement</button>
-                <button class="secondary" type="button" data-emergency-iou-action="settled" data-emergency-iou-id="${escapeHtml(iou.id)}">Mark Settled</button>
                 <button class="secondary" type="button" data-emergency-iou-action="disputed" data-emergency-iou-id="${escapeHtml(iou.id)}">Mark Disputed</button>
               </div>
             </div>
@@ -6250,18 +6254,6 @@
 
         if (action === 'record-settlement') {
           recordEmergencySettlement();
-          return;
-        }
-
-        if (action === 'settled') {
-          setEmergencyIouStatus(id, 'settled', {
-            settlement_reference: iou.settlement_reference || 'manual_member_review',
-            settled_at: iou.settled_at || new Date().toISOString()
-          });
-          appendEmergencyAuditEvent('marked_settled', activeEmergencyIou, {
-            settlement_reference: activeEmergencyIou.settlement_reference || 'manual_member_review'
-          });
-          updateEmergencyStatus('Emergency IOU marked settled locally after member review.');
           return;
         }
 
@@ -6349,44 +6341,73 @@
           return;
         }
 
-        if (reference.startsWith('0x') && !isEvmTxHash(reference)) {
-          updateEmergencyStatus('That looks like an EVM hash, but it is not a 66-character hex transaction hash.');
+        if ((activeEmergencyIou.settlement_status || 'unsettled') === 'settled') {
+          updateEmergencyStatus('This IOU is already recorded as settled. Preserve its existing confirmation evidence.');
+          return;
+        }
+        if ((activeEmergencyIou.settlement_status || 'unsettled') === 'disputed') {
+          updateEmergencyStatus('This IOU is disputed. Resolve the dispute before recording settlement evidence.');
+          return;
+        }
+        const validation = validateEmergencySettlementReference(activeEmergencyIou.chain_id, reference);
+        if (!validation.ok) {
+          updateEmergencyStatus(validation.message);
           return;
         }
 
-        const settledAt = new Date().toISOString();
-        setEmergencyIouStatus(activeEmergencyIou.id, 'settled', {
-          settlement_reference: reference,
-          settled_at: settledAt
+        const evidenceRecordedAt = new Date().toISOString();
+        setEmergencyIouStatus(activeEmergencyIou.id, 'settlement_evidence_recorded', {
+          settlement_reference: validation.reference,
+          settlement_reference_kind: validation.kind,
+          settlement_evidence_recorded_at: evidenceRecordedAt,
+          settled_at: null
         });
         appendEmergencyAuditEvent('settlement_evidence_recorded', activeEmergencyIou, {
-          settlement_reference: reference
+          settlement_reference: validation.reference,
+          settlement_reference_kind: validation.kind,
+          settlement_evidence_is_not_confirmation: true
         });
 
         const record = {
           id: `emergency-iou-settlement-${Date.now()}`,
-          recordedAt: settledAt,
-          occurredAt: settledAt,
+          recordedAt: evidenceRecordedAt,
+          occurredAt: evidenceRecordedAt,
           type: 'pyra_emergency_iou_settlement_review',
           direction: 'internal',
           status: 'review_required',
           memberId: currentAccount || activeEmergencyIou.debtor_id,
           counterpartyId: activeEmergencyIou.creditor_id,
           chainId: activeEmergencyIou.chain_id,
-          transactionHash: reference,
+          transactionHash: validation.reference,
           amount: activeEmergencyIou.amount,
           tokenSymbol: activeEmergencyIou.token_symbol || 'PYRA',
           barterCreditValue: null,
           sourceOrderId: activeEmergencyIou.id,
           paymentReference: 'emergency_iou_settlement_reference',
-          notes: `Emergency IOU settlement evidence recorded for ${activeEmergencyIou.id}; member/admin review still required.`
+          notes: `Emergency IOU settlement evidence recorded for ${activeEmergencyIou.id}; this is not settlement confirmation and member/admin or chain-indexer review is still required.`
         };
 
         activityRecords.unshift(record);
         saveActivityRecords();
         renderActivityRecords();
-        updateEmergencyStatus('Emergency IOU settlement evidence recorded and added to Activity for review.');
+        updateEmergencyStatus('Settlement evidence recorded for review. The IOU remains outstanding until member/admin or chain-indexer confirmation.');
         document.getElementById('member-status').textContent = 'emergency settlement evidence recorded';
+      }
+
+      function validateEmergencySettlementReference(chainId, reference) {
+        const text = String(reference || '').trim();
+        if (['base', 'ethereum', 'bnb'].includes(chainId)) {
+          return isEvmTxHash(text)
+            ? { ok: true, reference: text.toLowerCase(), kind: 'evm_transaction_hash' }
+            : { ok: false, message: 'Enter a complete 0x-prefixed 32-byte transaction hash for this EVM settlement.' };
+        }
+        if (chainId === 'algorand') {
+          const normalized = text.toUpperCase();
+          return /^[A-Z2-7]{52}$/.test(normalized)
+            ? { ok: true, reference: normalized, kind: 'algorand_transaction_id' }
+            : { ok: false, message: 'Enter a complete 52-character Algorand transaction ID.' };
+        }
+        return { ok: false, message: 'Settlement evidence validation is not configured for this chain.' };
       }
 
       function exportEmergencyIouQueue() {
@@ -6502,7 +6523,7 @@
 
       function getEmergencyStatusTagClass(status) {
         if (status === 'settled') return 'ready';
-        if (status === 'disputed' || status === 'settlement_prepared') return 'pending';
+        if (status === 'disputed' || status === 'settlement_prepared' || status === 'settlement_evidence_recorded') return 'pending';
         return '';
       }
 

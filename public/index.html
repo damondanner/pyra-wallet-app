@@ -1280,6 +1280,9 @@
       const WALLET_EMERGENCY_IOU_STORAGE_KEY = 'pyra-wallet-emergency-ious-v1';
       const WALLET_EMERGENCY_AUDIT_STORAGE_KEY = 'pyra-wallet-emergency-audit-v1';
       const WALLET_EMERGENCY_PACKET_STORAGE_KEY = 'pyra-wallet-emergency-packets-v1';
+      const EMERGENCY_IOU_IMPORT_MAX_BYTES = 256 * 1024;
+      const EMERGENCY_RECOVERY_IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+      const EMERGENCY_QR_PAYLOAD_MAX_LENGTH = 64 * 1024;
       let deferredInstallPrompt = null;
       let barterCreditRefreshPromise = null;
       let currentBarterCreditSnapshot = null;
@@ -5310,6 +5313,10 @@
           updateEmergencyStatus('Select a PYRA emergency IOU JSON file first.');
           return;
         }
+        if (file.size > EMERGENCY_IOU_IMPORT_MAX_BYTES) {
+          updateEmergencyStatus('Emergency IOU import rejected: the JSON file exceeds 256 KB.');
+          return;
+        }
 
         try {
           const payload = JSON.parse(await file.text());
@@ -5321,25 +5328,60 @@
           updateEmergencyStatus(`Emergency IOU imported from ${file.name}.`);
           document.getElementById('member-status').textContent = 'emergency iou imported';
         } catch (error) {
-          updateEmergencyStatus('Emergency IOU import failed: select a valid IOU JSON export.');
+          updateEmergencyStatus(error && error.message === 'emergency_iou_core_terms_conflict'
+            ? 'Emergency IOU import rejected: this ID already exists with different amount, parties, chain, or description.'
+            : 'Emergency IOU import failed: select a valid IOU JSON export.');
         }
       }
 
       function normalizeEmergencyIouPayload(payload) {
         if (!payload || payload.type !== 'pyra_emergency_iou') throw new Error('invalid_emergency_iou');
         if (payload.version !== 1) throw new Error('unsupported_emergency_iou_version');
-        if (!isPositiveDecimal(payload.amount)) throw new Error('invalid_emergency_amount');
-        if (!payload.debtor_id || !payload.creditor_id || !payload.description || !payload.chain_id) {
+        if (!isPositiveDecimal(payload.amount) || String(payload.amount).trim().length > 80) {
+          throw new Error('invalid_emergency_amount');
+        }
+        if (!isBoundedEmergencyText(payload.id, 128) || !/^emergency-iou-[0-9a-z-]+$/i.test(payload.id)) {
+          throw new Error('invalid_emergency_iou_id');
+        }
+        if (!isBoundedEmergencyText(payload.debtor_id, 200)
+          || !isBoundedEmergencyText(payload.creditor_id, 200)
+          || !isBoundedEmergencyText(payload.description, 1000)
+          || !isBoundedEmergencyText(payload.chain_id, 32)) {
           throw new Error('missing_emergency_iou_fields');
+        }
+        const createdAt = new Date(payload.created_at);
+        if (Number.isNaN(createdAt.getTime()) || createdAt.getTime() > Date.now() + (5 * 60 * 1000)) {
+          throw new Error('invalid_emergency_created_at');
+        }
+        const settlementStatus = payload.settlement_status || 'unsettled';
+        if (!['unsettled', 'settlement_prepared', 'settled', 'disputed'].includes(settlementStatus)) {
+          throw new Error('invalid_emergency_settlement_status');
+        }
+        if (payload.settlement_reference != null && !isBoundedEmergencyText(payload.settlement_reference, 256)) {
+          throw new Error('invalid_emergency_settlement_reference');
+        }
+        if (payload.settled_at != null) {
+          const settledAt = new Date(payload.settled_at);
+          if (Number.isNaN(settledAt.getTime()) || settledAt.getTime() > Date.now() + (5 * 60 * 1000)) {
+            throw new Error('invalid_emergency_settled_at');
+          }
         }
 
         return {
           ...payload,
+          id: payload.id.trim(),
+          created_at: createdAt.toISOString(),
+          chain_id: payload.chain_id.trim(),
+          amount: String(payload.amount).trim(),
+          token_symbol: 'PYRA',
+          debtor_id: payload.debtor_id.trim(),
+          creditor_id: payload.creditor_id.trim(),
+          description: payload.description.trim(),
           copy_role: payload.copy_role || 'shared',
           two_party_handoff: payload.two_party_handoff === true,
           required_counterparty_copy: payload.required_counterparty_copy || null,
           handoff_acknowledgements: normalizeEmergencyHandoffAcknowledgements(payload.handoff_acknowledgements),
-          settlement_status: payload.settlement_status || 'unsettled',
+          settlement_status: settlementStatus,
           settlement_reference: payload.settlement_reference || null,
           settled_at: payload.settled_at || null,
           settlement_required_when_online: true,
@@ -5418,6 +5460,10 @@
           updateEmergencyStatus('Paste an emergency IOU payload first.');
           return;
         }
+        if (payloadText.length > EMERGENCY_QR_PAYLOAD_MAX_LENGTH) {
+          updateEmergencyStatus('Emergency payload rejected: the QR payload exceeds 64 KB.');
+          return;
+        }
 
         try {
           activeEmergencyIou = upsertEmergencyIou(normalizeEmergencyIouPayload(parseEmergencyIouPayload(payloadText)));
@@ -5429,7 +5475,9 @@
           updateEmergencyStatus(`Emergency IOU imported from ${copyRole} QR-ready payload.`);
           document.getElementById('member-status').textContent = 'emergency payload imported';
         } catch (error) {
-          updateEmergencyStatus('Emergency payload import failed: check the pasted pyra:emergency-iou payload.');
+          updateEmergencyStatus(error && error.message === 'emergency_iou_core_terms_conflict'
+            ? 'Emergency payload rejected: this IOU ID conflicts with the original terms saved on this device.'
+            : 'Emergency payload import failed: check the pasted pyra:emergency-iou payload.');
         }
       }
 
@@ -5834,9 +5882,15 @@
           updateEmergencyStatus('Select a PYRA emergency recovery packet JSON file first.');
           return;
         }
+        if (file.size > EMERGENCY_RECOVERY_IMPORT_MAX_BYTES) {
+          updateEmergencyStatus('Recovery packet import rejected before local records changed: the JSON file exceeds 5 MB.');
+          return;
+        }
 
         try {
-          const packet = normalizeEmergencyRecoveryPacket(JSON.parse(await file.text()));
+          const packet = await preflightEmergencyRecoveryPacket(
+            normalizeEmergencyRecoveryPacket(JSON.parse(await file.text()))
+          );
           const importedIouCount = importEmergencyRecoveryIous(packet.emergency_ious);
           const importedActivityCount = importEmergencyRecoveryActivityRecords(packet.related_activity_records);
           const restoredAuditCount = importEmergencyRecoveryAuditRecords(packet.emergency_audit_records);
@@ -5863,7 +5917,8 @@
           updateEmergencyStatus(`Recovery packet imported from ${file.name}: ${importedIouCount} IOU(s), ${importedActivityCount} activity record(s), ${restoredAuditCount} audit event(s) restored.`);
           document.getElementById('member-status').textContent = 'recovery packet imported';
         } catch (error) {
-          updateEmergencyStatus('Recovery packet import failed: select a valid PYRA emergency recovery packet JSON file.');
+          const reason = getEmergencyRecoveryImportFailureMessage(error);
+          updateEmergencyStatus(`Recovery packet import rejected before local records changed: ${reason}`);
         }
       }
 
@@ -5936,12 +5991,24 @@
         if (!payload || payload.type !== 'pyra_emergency_recovery_packet' || payload.version !== 1) {
           throw new Error('invalid_emergency_recovery_packet');
         }
+        if (!Array.isArray(payload.emergency_ious) || payload.emergency_ious.length > 200) {
+          throw new Error('invalid_emergency_recovery_iou_count');
+        }
+        if (!Array.isArray(payload.emergency_audit_records) || payload.emergency_audit_records.length > 500) {
+          throw new Error('invalid_emergency_recovery_audit_count');
+        }
+        if (!Array.isArray(payload.related_activity_records) || payload.related_activity_records.length > 500) {
+          throw new Error('invalid_emergency_recovery_activity_count');
+        }
+        if (payload.head_hash !== null && !/^[a-f0-9]{64}$/i.test(String(payload.head_hash || ''))) {
+          throw new Error('invalid_emergency_recovery_head_hash');
+        }
 
         return {
           ...payload,
-          emergency_ious: Array.isArray(payload.emergency_ious) ? payload.emergency_ious : [],
-          emergency_audit_records: Array.isArray(payload.emergency_audit_records) ? payload.emergency_audit_records : [],
-          related_activity_records: Array.isArray(payload.related_activity_records) ? payload.related_activity_records : [],
+          emergency_ious: payload.emergency_ious,
+          emergency_audit_records: payload.emergency_audit_records,
+          related_activity_records: payload.related_activity_records,
           counts: payload.counts || {},
           guardrails: {
             ...(payload.guardrails || {}),
@@ -6000,9 +6067,11 @@
           source_file: sourceFile,
           packet_exported_at: packet.exported_at || null,
           packet_head_hash: packet.head_hash || null,
+          verified_audit: packet.verified_audit || null,
           counts: packet.counts || {},
           guardrails: {
             imported_packet_evidence_only: true,
+            packet_audit_verified_before_import: true,
             no_private_keys_or_seed_phrases: true,
             no_kyc_documents: true,
             photo_image_bytes_excluded: true
@@ -6028,17 +6097,25 @@
       }
 
       async function verifyEmergencyAuditRecords(records) {
-        let expectedPreviousHash = 'genesis';
         const ordered = [...records].reverse();
+        const tailAnchorHash = ordered[0] ? ordered[0].previous_hash : 'genesis';
+        let expectedPreviousHash = tailAnchorHash;
+        let expectedSequence = ordered[0] ? ordered[0].sequence : 1;
+        let unverifiedHashCount = 0;
 
         for (const record of ordered) {
           const { event_hash: eventHash, ...unsignedRecord } = record;
+          if (record.sequence !== expectedSequence) {
+            return { ok: false, sequence: record.sequence, reason: 'sequence_mismatch' };
+          }
           if (record.previous_hash !== expectedPreviousHash) {
             return { ok: false, sequence: record.sequence, reason: 'previous_hash_mismatch' };
           }
 
           if (!eventHash || eventHash.startsWith('hash_unavailable_')) {
+            unverifiedHashCount += 1;
             expectedPreviousHash = eventHash;
+            expectedSequence += 1;
             continue;
           }
 
@@ -6048,12 +6125,16 @@
           }
 
           expectedPreviousHash = eventHash;
+          expectedSequence += 1;
         }
 
         return {
           ok: true,
           count: records.length,
-          headHash: records[0] ? records[0].event_hash : null
+          headHash: records[0] ? records[0].event_hash : null,
+          tailAnchorHash,
+          anchoredAtGenesis: tailAnchorHash === 'genesis',
+          unverifiedHashCount
         };
       }
 
@@ -6071,14 +6152,18 @@
         const normalized = normalizeEmergencyIouPayload(iou);
         const existingIndex = emergencyIous.findIndex(record => record.id === normalized.id);
         const existing = existingIndex >= 0 ? emergencyIous[existingIndex] : null;
+        if (existing && !emergencyIouCoreTermsMatch(existing, normalized)) {
+          throw new Error('emergency_iou_core_terms_conflict');
+        }
         const incomingStatus = normalized.settlement_status || 'unsettled';
-        const preservedStatus = existing && existing.settlement_status !== 'unsettled' && incomingStatus === 'unsettled'
-          ? existing.settlement_status
-          : incomingStatus;
+        const preservedStatus = existing ? existing.settlement_status || 'unsettled' : incomingStatus;
         const next = {
           ...(existing || {}),
           ...normalized,
           settlement_status: preservedStatus,
+          settlement_reference: existing ? existing.settlement_reference || null : normalized.settlement_reference,
+          settled_at: existing ? existing.settled_at || null : normalized.settled_at,
+          status_updated_at: existing ? existing.status_updated_at || null : normalized.status_updated_at,
           handoff_acknowledgements: mergeEmergencyHandoffAcknowledgements(
             existing ? existing.handoff_acknowledgements : [],
             normalized.handoff_acknowledgements
@@ -7533,6 +7618,90 @@
           chain: document.getElementById('activity-filter-chain').value,
           search: document.getElementById('activity-search').value.trim()
         };
+      }
+
+      async function preflightEmergencyRecoveryPacket(packet) {
+        const auditVerification = await verifyEmergencyAuditRecords(packet.emergency_audit_records);
+        if (!auditVerification.ok || auditVerification.unverifiedHashCount > 0) {
+          throw new Error('emergency_recovery_audit_verification_failed');
+        }
+        if ((packet.head_hash || null) !== (auditVerification.headHash || null)) {
+          throw new Error('emergency_recovery_head_hash_mismatch');
+        }
+
+        const normalizedIous = [];
+        const packetIousById = new Map();
+        for (const record of packet.emergency_ious) {
+          const normalized = normalizeEmergencyIouPayload(record);
+          const duplicate = packetIousById.get(normalized.id);
+          if (duplicate && !emergencyIouCoreTermsMatch(duplicate, normalized)) {
+            throw new Error('emergency_recovery_duplicate_iou_conflict');
+          }
+          if (duplicate) throw new Error('emergency_recovery_duplicate_iou_id');
+          const local = emergencyIous.find(iou => iou.id === normalized.id);
+          if (local && !emergencyIouCoreTermsMatch(local, normalized)) {
+            throw new Error('emergency_iou_core_terms_conflict');
+          }
+          if (!duplicate) {
+            packetIousById.set(normalized.id, normalized);
+            normalizedIous.push(normalized);
+          }
+        }
+
+        const validActivityRecords = packet.related_activity_records.filter(isActivityRecordLike);
+        if (validActivityRecords.length !== packet.related_activity_records.length) {
+          throw new Error('emergency_recovery_invalid_activity_record');
+        }
+        const counts = packet.counts || {};
+        if (Number(counts.emergency_iou_records) !== packet.emergency_ious.length
+          || Number(counts.audit_events) !== packet.emergency_audit_records.length
+          || Number(counts.activity_records) !== packet.related_activity_records.length) {
+          throw new Error('emergency_recovery_count_mismatch');
+        }
+
+        return {
+          ...packet,
+          emergency_ious: normalizedIous,
+          related_activity_records: validActivityRecords,
+          verified_audit: auditVerification
+        };
+      }
+
+      function getEmergencyRecoveryImportFailureMessage(error) {
+        const messages = {
+          emergency_iou_core_terms_conflict: 'an IOU ID conflicts with the original terms already saved on this device.',
+          emergency_recovery_duplicate_iou_conflict: 'the packet contains two different sets of terms for the same IOU ID.',
+          emergency_recovery_duplicate_iou_id: 'the packet repeats an IOU ID; each IOU must appear exactly once.',
+          emergency_recovery_audit_verification_failed: 'the imported audit chain is incomplete, altered, or not cryptographically verifiable.',
+          emergency_recovery_head_hash_mismatch: 'the declared audit head does not match the imported audit records.',
+          emergency_recovery_count_mismatch: 'declared record counts do not match the packet contents.',
+          emergency_recovery_invalid_activity_record: 'the packet contains an invalid activity record.'
+        };
+        return messages[error && error.message]
+          || 'select an intact PYRA emergency recovery packet JSON file.';
+      }
+
+      function isBoundedEmergencyText(value, maxLength) {
+        return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= maxLength;
+      }
+
+      function getEmergencyIouCoreTerms(iou) {
+        return {
+          type: iou.type,
+          version: iou.version,
+          id: iou.id,
+          created_at: iou.created_at,
+          chain_id: iou.chain_id,
+          amount: iou.amount,
+          token_symbol: iou.token_symbol || 'PYRA',
+          debtor_id: iou.debtor_id,
+          creditor_id: iou.creditor_id,
+          description: iou.description
+        };
+      }
+
+      function emergencyIouCoreTermsMatch(left, right) {
+        return stableStringify(getEmergencyIouCoreTerms(left)) === stableStringify(getEmergencyIouCoreTerms(right));
       }
 
       async function exportWalletTradeEvidenceJson() {

@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'pyra-wallet-shell-';
-const CACHE_NAME = `${CACHE_PREFIX}v14`;
+const CACHE_NAME = `${CACHE_PREFIX}v15`;
 const APP_SHELL = [
   './',
   './index.html',

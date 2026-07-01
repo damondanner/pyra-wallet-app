@@ -1275,10 +1275,13 @@
       const WALLET_DIRECTORY_STORAGE_KEY = 'pyra-wallet-directory-records-v1';
       const WALLET_BARTER_CREDIT_SNAPSHOT_STORAGE_KEY = 'pyra-wallet-barter-credit-snapshot-v1';
       const BUSINESS_BARTER_CREDIT_VALUE = 5000;
+      const BARTER_CREDIT_REFRESH_MS = 5 * 60 * 1000;
+      const BARTER_CREDIT_FETCH_TIMEOUT_MS = 12000;
       const WALLET_EMERGENCY_IOU_STORAGE_KEY = 'pyra-wallet-emergency-ious-v1';
       const WALLET_EMERGENCY_AUDIT_STORAGE_KEY = 'pyra-wallet-emergency-audit-v1';
       const WALLET_EMERGENCY_PACKET_STORAGE_KEY = 'pyra-wallet-emergency-packets-v1';
       let deferredInstallPrompt = null;
+      let barterCreditRefreshPromise = null;
       let currentBarterCreditSnapshot = null;
       let currentPricingMode = 'standard';
       const sampleVoteProposal = {
@@ -1570,7 +1573,7 @@
 
       loadWalletConfig();
       refreshBarterCredit();
-      setInterval(() => refreshBarterCredit(), 5 * 60 * 1000);
+      setInterval(() => refreshBarterCredit(), BARTER_CREDIT_REFRESH_MS);
       updateTargetNetworkLabel();
 
       function setupInstallableWallet() {
@@ -1583,7 +1586,10 @@
           connectionStatus.textContent = online ? 'online' : 'offline mode';
         };
 
-        window.addEventListener('online', updateConnectionStatus);
+        window.addEventListener('online', () => {
+          updateConnectionStatus();
+          refreshBarterCredit();
+        });
         window.addEventListener('offline', updateConnectionStatus);
         updateConnectionStatus();
 
@@ -1615,11 +1621,21 @@
         }
       }
 
-      async function refreshBarterCredit() {
+      function refreshBarterCredit() {
+        if (barterCreditRefreshPromise) return barterCreditRefreshPromise;
+        barterCreditRefreshPromise = performBarterCreditRefresh()
+          .finally(() => { barterCreditRefreshPromise = null; });
+        return barterCreditRefreshPromise;
+      }
+
+      async function performBarterCreditRefresh() {
         const value = document.getElementById('wallet-barter-credit-value');
         const source = document.getElementById('wallet-barter-credit-source');
-        const refreshBucket = Math.floor(Date.now() / (5 * 60 * 1000));
+        const refreshBucket = Math.floor(Date.now() / BARTER_CREDIT_REFRESH_MS);
         const retainedSnapshot = loadStoredBarterCreditSnapshot();
+        const fallbackSnapshot = retainedSnapshot || currentBarterCreditSnapshot;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), BARTER_CREDIT_FETCH_TIMEOUT_MS);
 
         if (retainedSnapshot) {
           currentBarterCreditSnapshot = retainedSnapshot;
@@ -1629,24 +1645,29 @@
         try {
           const response = await fetch(`https://pyraprotocol.com/api/barter-credit.json?v=${refreshBucket}`, {
             headers: { accept: 'application/json' },
-            cache: 'no-store'
+            cache: 'no-store',
+            signal: controller.signal
           });
-          if (!response.ok) throw new Error(`barter credit HTTP ${response.status}`);
+          if (!response.ok) throw createBarterCreditRefreshError(response);
           const snapshot = await response.json();
+          const calculatedAt = new Date(snapshot && snapshot.calculated_at);
           if (
             snapshot.type !== 'pyra_public_barter_credit_snapshot' ||
             snapshot.status !== 'success' ||
-            !Number.isFinite(Number(snapshot.value))
+            !Number.isFinite(Number(snapshot.value)) ||
+            Number(snapshot.value) <= 0 ||
+            Number.isNaN(calculatedAt.getTime()) ||
+            calculatedAt.getTime() > Date.now() + (5 * 60 * 1000)
           ) {
-            throw new Error('invalid barter credit snapshot');
+            throw { code: 'invalid_barter_credit_snapshot' };
           }
 
           const validatedSnapshot = {
             type: 'pyra_public_barter_credit_snapshot',
             status: 'success',
             value: Number(snapshot.value),
-            source: snapshot.source || 'PYRA public pricing endpoint',
-            calculated_at: snapshot.calculated_at || new Date().toISOString(),
+            source: String(snapshot.source || 'PYRA public pricing endpoint').slice(0, 160),
+            calculated_at: calculatedAt.toISOString(),
             retained_at: new Date().toISOString(),
             pricing_mode: 'standard_network'
           };
@@ -1654,18 +1675,21 @@
           storeBarterCreditSnapshot(validatedSnapshot);
           renderBarterCreditSnapshot(validatedSnapshot, 'live');
         } catch (error) {
+          const failure = normalizeBarterCreditRefreshFailure(error);
           if (currentPricingMode === 'business') {
             renderBusinessBarterCredit();
-          } else if (retainedSnapshot) {
-            renderBarterCreditSnapshot(retainedSnapshot, 'offline');
+          } else if (fallbackSnapshot) {
+            renderBarterCreditSnapshot(fallbackSnapshot, navigator.onLine ? failure.state : 'offline', failure);
           } else {
             value.textContent = 'btc (barter credit) unavailable';
-            source.textContent = 'No validated standard network value has been stored on this device. The business-instance value of btc (barter credit) 5000 is never used as a fallback.';
+            source.textContent = createUnavailableBarterCreditMessage(failure);
           }
+        } finally {
+          clearTimeout(timeout);
         }
       }
 
-      function renderBarterCreditSnapshot(snapshot, state) {
+      function renderBarterCreditSnapshot(snapshot, state, failure = {}) {
         if (currentPricingMode === 'business') {
           renderBusinessBarterCredit();
           return;
@@ -1675,16 +1699,79 @@
         const source = document.getElementById('wallet-barter-credit-source');
         const calculatedAt = new Date(snapshot.calculated_at);
         const updated = Number.isNaN(calculatedAt.getTime()) ? 'time unavailable' : calculatedAt.toLocaleString();
+        const age = getBarterCreditSnapshotAgeLabel(calculatedAt);
         value.textContent = `btc (barter credit) ${formatBtcAmount(Number(snapshot.value))}`;
         document.getElementById('wallet-barter-credit-mode').textContent = 'Public instance; standard network calculation.';
 
         if (state === 'live') {
-          source.textContent = `${snapshot.source}; standard network value updated ${updated}.`;
+          source.textContent = `${snapshot.source}; standard network value updated ${updated} (${age}).`;
         } else if (state === 'offline') {
-          source.textContent = `Offline: using the last validated standard network value from ${updated}. No new calculation was performed; btc (barter credit) 5000 remains business-instance only.`;
+          source.textContent = `Offline: using the last validated standard network value from ${updated} (${age}). No new calculation was performed; btc (barter credit) 5000 remains business-instance only.`;
+        } else if (state === 'limited') {
+          source.textContent = `Pricing service is busy; using the last validated standard network value from ${updated} (${age}).${formatBarterCreditRetry(failure)}${formatBarterCreditSupportReference(failure)}`;
+        } else if (state === 'timeout') {
+          source.textContent = `Pricing update timed out; using the last validated standard network value from ${updated} (${age}). No new calculation was performed.`;
+        } else if (state === 'unavailable') {
+          source.textContent = `Pricing update unavailable; using the last validated standard network value from ${updated} (${age}). No new calculation was performed.`;
         } else {
-          source.textContent = `Last validated standard network value from ${updated}; checking for an update.`;
+          source.textContent = `Last validated standard network value from ${updated} (${age}); checking for an update.`;
         }
+      }
+
+      function createBarterCreditRefreshError(response) {
+        return {
+          code: response.status === 429 ? 'barter_credit_rate_limited' : 'barter_credit_http_error',
+          status: response.status,
+          retryAfter: response.headers.get('retry-after'),
+          requestId: response.headers.get('x-request-id')
+        };
+      }
+
+      function normalizeBarterCreditRefreshFailure(error) {
+        const state = error && error.code === 'barter_credit_rate_limited'
+          ? 'limited'
+          : error && (error.name === 'AbortError' || error.code === 'barter_credit_timeout')
+            ? 'timeout'
+            : 'unavailable';
+        const retrySeconds = Number.parseInt(error && error.retryAfter, 10);
+        const requestId = /^[0-9a-z-]{8,64}$/i.test(String(error && error.requestId || ''))
+          ? String(error.requestId)
+          : null;
+        return {
+          state,
+          retrySeconds: Number.isInteger(retrySeconds) && retrySeconds > 0 && retrySeconds <= 3600 ? retrySeconds : null,
+          requestId
+        };
+      }
+
+      function createUnavailableBarterCreditMessage(failure) {
+        const reason = !navigator.onLine
+          ? 'Offline and no validated standard network value is stored on this device.'
+          : failure.state === 'limited'
+            ? `Pricing service is busy and no validated standard network value is stored on this device.${formatBarterCreditRetry(failure)}${formatBarterCreditSupportReference(failure)}`
+            : failure.state === 'timeout'
+              ? 'Pricing update timed out and no validated standard network value is stored on this device.'
+              : 'Pricing update unavailable and no validated standard network value is stored on this device.';
+        return `${reason} The business-instance value of btc (barter credit) 5000 is never used as a fallback.`;
+      }
+
+      function formatBarterCreditRetry(failure) {
+        return failure && failure.retrySeconds ? ` Try again in about ${failure.retrySeconds} seconds.` : '';
+      }
+
+      function formatBarterCreditSupportReference(failure) {
+        return failure && failure.requestId ? ` Support reference ${failure.requestId}.` : '';
+      }
+
+      function getBarterCreditSnapshotAgeLabel(date) {
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) return 'age unavailable';
+        const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+        if (minutes < 1) return 'less than 1 minute old';
+        if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} old`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 48) return `${hours} hour${hours === 1 ? '' : 's'} old`;
+        const days = Math.floor(hours / 24);
+        return `${days} day${days === 1 ? '' : 's'} old`;
       }
 
       function setPricingMode(mode, options = {}) {
@@ -1760,14 +1847,21 @@
       function loadStoredBarterCreditSnapshot() {
         try {
           const snapshot = JSON.parse(localStorage.getItem(WALLET_BARTER_CREDIT_SNAPSHOT_STORAGE_KEY) || 'null');
+          const calculatedAt = new Date(snapshot && snapshot.calculated_at);
           if (
             !snapshot ||
             snapshot.type !== 'pyra_public_barter_credit_snapshot' ||
             snapshot.status !== 'success' ||
             !Number.isFinite(Number(snapshot.value)) ||
-            Number(snapshot.value) <= 0
+            Number(snapshot.value) <= 0 ||
+            Number.isNaN(calculatedAt.getTime()) ||
+            calculatedAt.getTime() > Date.now() + (5 * 60 * 1000)
           ) return null;
-          return snapshot;
+          return {
+            ...snapshot,
+            source: String(snapshot.source || 'PYRA public pricing endpoint').slice(0, 160),
+            calculated_at: calculatedAt.toISOString()
+          };
         } catch (error) {
           return null;
         }
